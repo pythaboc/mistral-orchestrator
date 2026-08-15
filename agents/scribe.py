@@ -35,6 +35,17 @@ Règles :
 - Retourne UNIQUEMENT le texte de l'entrée de journal, sans préambule,
   sans titre, sans markdown superflu. Une entrée doit tenir en un paragraphe."""
 
+_SUMMARY_SYSTEM = """Tu es le scribe d'une équipe d'agents IA. Tu relis le
+journal du projet pour préparer un résumé de la dernière session à destination
+de l'utilisateur qui revient.
+
+Règles :
+- Résume en 3 à 6 lignes MAX ce qui a été fait la dernière fois.
+- Mentionne les décisions clés, le code produit, les recherches faites.
+- Si le journal est vide ou inexistant, dis simplement qu'il s'agit de la
+  première session.
+- Sois chaleureux mais factuel. Pas de markdown, juste du texte."""
+
 
 def record_entry(
     category: str,
@@ -47,7 +58,7 @@ def record_entry(
     Enregistre une entrée dans le journal.
 
     Args:
-        category: "decision" | "observation" | "alerte" | "recherche" | "code".
+        category: "decision" | "observation" | "alerte" | "recherche" | "code" | "session".
         content: texte brut à mémoriser.
         author: qui prend la décision (nom de l'agent ou "humain").
         commit: si True, fait un git commit du journal après écriture.
@@ -70,6 +81,53 @@ def record_entry(
     if commit:
         _git_commit_journal(entry_summary=f"{category} par {author}")
     return entry
+
+
+def read_journal() -> str:
+    """
+    Retourne le contenu brut du journal, ou une chaîne vide s'il n'existe pas.
+
+    C'est la base utilisée pour générer le résumé de la dernière session.
+    """
+    if not os.path.exists(_JOURNAL_PATH):
+        return ""
+    try:
+        with open(_JOURNAL_PATH, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError as exc:
+        logger.warning("Lecture du journal impossible : %s", exc)
+        return ""
+
+
+def summarize_previous_session() -> str:
+    """
+    Génère un résumé de la dernière session à partir du journal.
+
+    Utilise le modèle Small pour synthétiser l'historique. Si le journal est
+    vide, indique qu'il s'agit de la première session.
+
+    Returns:
+        Un résumé de 3 à 6 lignes de ce qui a été fait la dernière fois.
+    """
+    model = os.getenv("SCRIBE_MODEL", "mistral-small-latest")
+    journal = read_journal()
+
+    if not journal.strip():
+        return (
+            "Bienvenue ! Il s'agit de votre première session. "
+            "Le journal du projet est encore vide — les décisions et points clés "
+            "seront enregistrés automatiquement au fur et à mesure par le scribe."
+        )
+
+    prompt = (
+        "Voici le journal du projet (entrées chronologiques) :\n\n"
+        f"{journal}\n\n"
+        "Résume ce qui a été fait lors de la dernière session "
+        "(les entrées les plus récentes) en 3 à 6 lignes."
+    )
+    summary = simple_prompt(prompt, model=model, system=_SUMMARY_SYSTEM, temperature=0.2)
+    record_tokens(model, estimate_tokens(prompt), estimate_tokens(summary))
+    return summary
 
 
 def _append_to_journal(entry: str) -> None:
