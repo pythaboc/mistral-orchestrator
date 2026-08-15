@@ -24,9 +24,6 @@ from agents.scribe import record_entry, summarize_previous_session
 from agents.watcher import BudgetExceeded
 from orchestrator import Orchestrator
 
-# Tâche d'exemple pour le mode non-interactif.
-DEFAULT_TASK = "Écris une fonction Python qui valide un numéro IBAN selon le format international."
-
 
 def setup_logging(verbose: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.WARNING
@@ -62,19 +59,27 @@ def print_result(result) -> None:
     print()
     print("─" * 60)
 
+    # Plan de l'orchestrateur
+    if result.plan:
+        print()
+        print("📋 Plan de l'orchestrateur :")
+        print(f"   {result.plan[:500]}")
+
     if result.research:
+        print()
         print("📚 Chercheur :")
         answer = result.research.get("answer", "")
-        print(f"   {answer[:400]}{'...' if len(answer) > 400 else ''}")
+        print(f"   {answer[:500]}{'...' if len(answer) > 500 else ''}")
         sources = result.research.get("sources", [])
         if sources:
             print("   Sources :")
             for s in sources[:3]:
                 print(f"     - {s.get('title', '')[:60]} ({s.get('url', '')})")
-        print()
 
+    print()
     print(f"🧑\u200d💻 Codeurs : {len(result.code_candidates)} candidat(s) · "
-          f"🔁 itérations code→vérif : {result.iterations} · "
+          f"candidat #{result.chosen_candidate + 1} retenu · "
+          f"🔁 itérations : {result.iterations} · "
           f"✅ verdict final : {result.verification.get('verdict', '?')}")
 
     print()
@@ -101,7 +106,7 @@ def print_result(result) -> None:
         print("   Par agent : " + ", ".join(f"{k}={v}" for k, v in by_agent.items()))
     analysis = usage.get("analysis", "")
     if analysis:
-        print(f"   Analyse : {analysis[:200]}")
+        print(f"   Analyse : {analysis[:300]}")
 
     print(f"\n📝 {len(result.journal_entries)} entrée(s) ajoutée(s) au journal par le scribe.")
     print("─" * 60)
@@ -109,7 +114,6 @@ def print_result(result) -> None:
 
 def run_one_task(orch: Orchestrator, task: str, *, one_coder: bool, max_iter: int) -> None:
     """Exécute une tâche via l'orchestrateur et affiche le résultat."""
-    print(f"\n▶ Tâche : {task}\n")
     try:
         result = orch.run(
             task,
@@ -138,7 +142,6 @@ def interactive_loop(orch: Orchestrator, *, max_iter: int) -> int:
     try:
         summary = summarize_previous_session()
     except Exception as exc:
-        # Pas de clé API : on lit quand même le journal brut si possible.
         from agents.scribe import read_journal
         journal = read_journal()
         if journal:
@@ -218,7 +221,7 @@ def main() -> int:
     parser.add_argument(
         "--max-iterations",
         type=int,
-        default=2,
+        default=3,
         help="Max de cycles code->vérification",
     )
     parser.add_argument(

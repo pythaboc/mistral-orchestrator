@@ -12,6 +12,7 @@ une "boîte noire".
 
 from __future__ import annotations
 
+import textwrap
 from typing import Any
 
 from tools.mistral_client import CallResult
@@ -21,15 +22,35 @@ _COLORS = {
     "orchestrateur": "\033[95m",   # magenta
     "chercheur": "\033[94m",       # bleu
     "codeur": "\033[92m",          # vert
-    "verificateur": "\033[93m",    # jaune
+    "codeur_1": "\033[92m",         # vert
+    "codeur_2": "\033[92m",         # vert
+    "verificateur": "\033[93m",     # jaune
     "veilleur": "\033[91m",        # rouge
     "scribe": "\033[96m",          # cyan
     "reset": "\033[0m",
 }
 
+# Largeur utile du terminal (onWrapping à cette largeur)
+_TERM_WIDTH = 120
+
 
 def _color(agent: str) -> str:
     return _COLORS.get(agent, _COLORS["orchestrateur"])
+
+
+def _wrap(text: str, indent: str = "    ", width: int = _TERM_WIDTH) -> str:
+    """Découpe un texte long sur plusieurs lignes avec indentation."""
+    if not text:
+        return ""
+    wrapped = textwrap.fill(
+        text,
+        width=width,
+        initial_indent=indent,
+        subsequent_indent=indent,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+    return wrapped
 
 
 def agent_start(agent: str, action: str, *, model: str = "") -> None:
@@ -43,10 +64,9 @@ def agent_start(agent: str, action: str, *, model: str = "") -> None:
 def agent_done(agent: str, summary: str, result: CallResult | None = None) -> None:
     """Affiche qu'un agent a fini, avec un résumé et les tokens consommés."""
     c = _color(agent)
-    # Tronque le résumé pour ne pas spammer
-    if len(summary) > 300:
-        summary = summary[:297] + "..."
-    print(f"{c}  ✓ {summary}{_COLORS['reset']}")
+    # On wrap le résumé s'il est long (au lieu de tronquer brutalement)
+    wrapped = _wrap(summary, indent="  ✓ ")
+    print(f"{c}{wrapped}{_COLORS['reset']}")
     if result is not None:
         tokens = result.total_tokens
         detail = f"{result.prompt_tokens} in + {result.completion_tokens} out"
@@ -55,9 +75,16 @@ def agent_done(agent: str, summary: str, result: CallResult | None = None) -> No
 
 
 def agent_info(agent: str, message: str) -> None:
-    """Affiche une info intermédiaire d'un agent."""
+    """Affiche une info intermédiaire d'un agent (avec wrapping)."""
     c = _color(agent)
-    print(f"{c}  · {message}{_COLORS['reset']}")
+    wrapped = _wrap(message, indent="  · ")
+    print(f"{c}{wrapped}{_COLORS['reset']}")
+
+
+def agent_thinking(agent: str, reasoning: str) -> None:
+    """Affiche le raisonnement d'un agent (orchestrateur qui réfléchit)."""
+    c = _color(agent)
+    print(f"{c}  💭 {reasoning}{_COLORS['reset']}")
 
 
 def agent_error(agent: str, error: str) -> None:
