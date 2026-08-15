@@ -12,8 +12,8 @@ import logging
 import os
 import re
 
-from monitoring.metrics import estimate_tokens, record_tokens
-from tools.mistral_client import simple_prompt
+import live
+from tools.mistral_client import CallResult, chat_complete
 
 logger = logging.getLogger("orchestrator.coder")
 
@@ -30,7 +30,7 @@ Règles :
 - Ne retourne QUE le code (avec ses commentaires), pas d'explication hors bloc."""
 
 
-def write_code(task: str, *, language: str = "python", context: str = "") -> dict:
+def write_code(task: str, *, language: str = "python", context: str = "", label: str = "codeur") -> dict:
     """
     Écrit du code pour une tâche.
 
@@ -38,19 +38,36 @@ def write_code(task: str, *, language: str = "python", context: str = "") -> dic
         task: description de ce qu'il faut coder.
         language: langage de programmation attendu.
         context: contexte additionnel (recherche, décisions précédentes, ...).
+        label: nom affiché (ex: "codeur_1", "codeur_2").
 
     Returns:
-        {"code": str, "language": str, "raw": str}
+        {"code": str, "language": str, "raw": str, "tokens": int}
     """
     prompt = f"Tâche : {task}\n\nLangage : {language}"
     if context:
         prompt += f"\n\nContexte :\n{context}"
 
-    raw = simple_prompt(prompt, model=_MODEL, system=_SYSTEM, temperature=0.3)
-    record_tokens(_MODEL, estimate_tokens(prompt), estimate_tokens(raw))
+    live.agent_start(label, f"Écriture de code {language}", model=_MODEL)
 
-    code = _extract_code_block(raw)
-    return {"code": code, "language": language, "raw": raw}
+    result = chat_complete(
+        _MODEL,
+        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": prompt}],
+        temperature=0.3,
+    )
+
+    code = _extract_code_block(result.content)
+    lines = code.count("\n") + 1
+    live.agent_done(
+        label,
+        f"{lines} lignes de code générées",
+        result=result,
+    )
+    return {
+        "code": code,
+        "language": language,
+        "raw": result.content,
+        "tokens": result.total_tokens,
+    }
 
 
 def _extract_code_block(text: str) -> str:

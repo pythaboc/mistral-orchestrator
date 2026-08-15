@@ -16,8 +16,8 @@ import os
 import subprocess
 from datetime import datetime
 
-from monitoring.metrics import estimate_tokens, record_tokens
-from tools.mistral_client import simple_prompt
+import live
+from tools.mistral_client import chat_complete
 
 logger = logging.getLogger("orchestrator.scribe")
 
@@ -67,16 +67,22 @@ def record_entry(
         L'entrée formatée telle qu'écrite dans le journal.
     """
     model = os.getenv("SCRIBE_MODEL", "mistral-small-latest")
+    live.agent_start("scribe", f"Enregistrement : {category}", model=model)
 
     # Le scribe synthétise l'entrée via le modèle Small (léger, peu coûteux).
-    summarized = simple_prompt(content, model=model, system=_SYSTEM, temperature=0.1)
-    record_tokens(model, estimate_tokens(content), estimate_tokens(summarized))
+    result = chat_complete(
+        model,
+        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": content}],
+        temperature=0.1,
+    )
+    summarized = result.content
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     entry = f"## [{ts}] {category.upper()} — par {author}\n\n{summarized}\n"
 
     _append_to_journal(entry)
     logger.info("Entrée de journal enregistrée (%s)", category)
+    live.agent_done("scribe", "Entrée ajoutée au journal", result=result)
 
     if commit:
         _git_commit_journal(entry_summary=f"{category} par {author}")
@@ -125,9 +131,14 @@ def summarize_previous_session() -> str:
         "Résume ce qui a été fait lors de la dernière session "
         "(les entrées les plus récentes) en 3 à 6 lignes."
     )
-    summary = simple_prompt(prompt, model=model, system=_SUMMARY_SYSTEM, temperature=0.2)
-    record_tokens(model, estimate_tokens(prompt), estimate_tokens(summary))
-    return summary
+    live.agent_start("scribe", "Lecture du journal pour le résumé de session", model=model)
+    result = chat_complete(
+        model,
+        [{"role": "system", "content": _SUMMARY_SYSTEM}, {"role": "user", "content": prompt}],
+        temperature=0.2,
+    )
+    live.agent_done("scribe", "Résumé de la dernière session généré", result=result)
+    return result.content
 
 
 def _append_to_journal(entry: str) -> None:

@@ -22,14 +22,14 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+import live
 from agents.coder import write_code
 from agents.researcher import search as research_search
 from agents.scribe import record_entry
 from agents.verifier import verify_code
 from agents.watcher import BudgetExceeded, Watcher
 from dotenv import load_dotenv
-from monitoring.metrics import estimate_tokens, record_tokens, record_task
-from tools.mistral_client import simple_prompt
+from tools.mistral_client import chat_complete
 
 load_dotenv()
 logger = logging.getLogger("orchestrator")
@@ -91,19 +91,13 @@ class Orchestrator:
     ) -> TaskResult:
         """
         Orchestre une tâche complète : recherche -> code -> vérification -> boucle.
-
-        Args:
-            task: la tâche à accomplir.
-            language: langage de programmation.
-            use_two_coders: si True, lance 2 codeurs en parallèle (divergence +
-            arbitrage par le vérificateur). Sinon, 1 seul codeur.
-            max_iterations: nombre max de cycles code->vérification si problèmes.
         """
-        record_task("orchestration")
         journal_entries: list[str] = []
 
         # 0. Le veilleur vérifie qu'on a encore du budget avant de démarrer.
         self.watcher.check_budget()
+
+        live.section(f"🎯 Tâche : {task[:100]}")
 
         # 1. L'orchestrateur décide s'il faut rechercher des infos externes.
         research = self._maybe_research(task, journal_entries)
@@ -119,7 +113,7 @@ class Orchestrator:
             task, language, research_context, use_two_coders, journal_entries
         )
 
-        # 3. Sélection du meilleur candidat (si 2) + vérification.
+        # 3. Sélection du meilleur candidat + vérification.
         iterations = 0
         current_code = code_candidates[0]["code"]
         verification = {}
@@ -128,10 +122,12 @@ class Orchestrator:
             iterations += 1
             self.watcher.check_budget()
 
+            live.section(f"🔁 Vérification — itération {iterations}/{max_iterations}")
             verification = self._verify(current_code, task, language, journal_entries)
             verdict = verification.get("verdict", "WARN")
 
             if verdict == "OK":
+                live.agent_info("orchestrateur", f"✅ Code validé après {iterations} itération(s)")
                 journal_entries.append(
                     record_entry(
                         "code",
@@ -142,12 +138,17 @@ class Orchestrator:
                 break
 
             # Verdict WARN ou FAIL : on relance les codeurs avec les retours.
-            issues = verification.get("issues", [])
+            issues = verification.get("issues", []) or []
             critical = [i for i in issues if i.get("severity") in ("critical", "high")]
             if not critical:
                 # WARN sans problème critique : on garde le code.
+                live.agent_info("orchestrateur", "Problèmes mineurs uniquement, on conserve le code")
                 break
 
+            live.agent_info(
+                "orchestrateur",
+                f"⚠️ {len(critical)} problème(s) critique(s) — relance des codeurs avec les retours"
+            )
             feedback = json.dumps(critical, ensure_ascii=False)
             journal_entries.append(
                 record_entry(
@@ -160,10 +161,14 @@ class Orchestrator:
                 task, language, current_code, feedback, journal_entries
             )
 
-        # 4. Rapport final du veilleur.
-        watcher_report = self.watcher.get_usage()
+        # 4. Analyse du veilleur + récapitulatif.
         analysis = self.watcher.analyze()
+        watcher_report = self.watcher.get_usage()
         watcher_report["analysis"] = analysis
+
+        # Récapitulatif visuel des tokens par agent.
+        live.task_summary(watcher_report["by_agent"], watcher_report["total_tokens"])
+
         journal_entries.append(
             record_entry(
                 "observation",
@@ -193,21 +198,22 @@ class Orchestrator:
         L'orchestrateur (Large) décide si une recherche web est nécessaire.
         Si oui, délègue au chercheur.
         """
-        self.watcher.track_call("orchestrateur", 0, estimate_tokens(task))
         prompt = (
             f"Voici une tâche de développement :\n{task}\n\n"
             f"Une recherche internet est-elle nécessaire pour accomplir cette "
             f"tâche (par exemple: API récente, librairie spécifique, format "
             f"à jour) ? Réponds UNIQUEMENT 'OUI' ou 'NON'."
         )
-        decision = simple_prompt(
-            prompt, model=_ORCHESTRATOR_MODEL, temperature=0.0
+        live.agent_start("orchestrateur", "Décision : recherche web nécessaire ?", model=_ORCHESTRATOR_MODEL)
+        result = chat_complete(
+            _ORCHESTRATOR_MODEL,
+            [{"role": "user", "content": prompt}],
+            temperature=0.0,
         )
-        record_tokens(
-            _ORCHESTRATOR_MODEL, estimate_tokens(prompt), estimate_tokens(decision)
-        )
+        self.watcher.track_call("orchestrateur", tokens=result.total_tokens)
+        live.agent_done("orchestrateur", f"Décision : {result.content.strip()[:20]}", result=result)
 
-        if "OUI" in decision.upper():
+        if "OUI" in result.content.upper():
             journal.append(
                 record_entry(
                     "decision",
@@ -215,15 +221,16 @@ class Orchestrator:
                     author="orchestrateur",
                 )
             )
-            result = research_search(task)
+            result_research = research_search(task)
+            self.watcher.track_call("chercheur", tokens=result_research.get("tokens", 0))
             journal.append(
                 record_entry(
                     "recherche",
-                    f"Recherche: {result.get('answer', '')[:200]}",
+                    f"Recherche: {result_research.get('answer', '')[:200]}",
                     author="chercheur",
                 )
             )
-            return result
+            return result_research
         return None
 
     def _run_coders(
@@ -235,15 +242,18 @@ class Orchestrator:
         journal: list[str],
     ) -> list[dict]:
         """Lance 1 ou 2 codeurs en parallèle."""
+        live.section("🧑\u200d💻 Codeurs en action")
+
         if use_two:
+            live.agent_info("orchestrateur", "Lancement de 2 codeurs en parallèle")
             with ThreadPoolExecutor(max_workers=2) as pool:
-                # Deux codeurs avec un temperature différent pour diverger.
-                fut_a = pool.submit(write_code, task, language=language, context=context)
-                fut_b = pool.submit(write_code, task, language=language, context=context)
+                # Deux codeurs avec un label différent (divergence via temperature).
+                fut_a = pool.submit(write_code, task, language=language, context=context, label="codeur_1")
+                fut_b = pool.submit(write_code, task, language=language, context=context, label="codeur_2")
                 code_a = fut_a.result()
                 code_b = fut_b.result()
-            self.watcher.track_call("codeur_1", 0, estimate_tokens(code_a.get("raw", "")))
-            self.watcher.track_call("codeur_2", 0, estimate_tokens(code_b.get("raw", "")))
+            self.watcher.track_call("codeur_1", tokens=code_a.get("tokens", 0))
+            self.watcher.track_call("codeur_2", tokens=code_b.get("tokens", 0))
             journal.append(
                 record_entry(
                     "code",
@@ -253,8 +263,8 @@ class Orchestrator:
             )
             return [code_a, code_b]
 
-        code = write_code(task, language=language, context=context)
-        self.watcher.track_call("codeur_1", 0, estimate_tokens(code.get("raw", "")))
+        code = write_code(task, language=language, context=context, label="codeur_1")
+        self.watcher.track_call("codeur_1", tokens=code.get("tokens", 0))
         journal.append(
             record_entry(
                 "code",
@@ -269,7 +279,7 @@ class Orchestrator:
     ) -> dict:
         """Fait vérifier le code par le vérificateur."""
         result = verify_code(code, task=task, language=language)
-        self.watcher.track_call("verificateur", 0, estimate_tokens(str(result)))
+        self.watcher.track_call("verificateur", tokens=result.get("tokens", 0))
         verdict = result.get("verdict", "WARN")
         journal.append(
             record_entry(
@@ -294,8 +304,8 @@ class Orchestrator:
             f"Problèmes signalés par le vérificateur :\n{feedback}\n\n"
             f"Corrige ces problèmes."
         )
-        result = write_code(task, language=language, context=context)
-        self.watcher.track_call("codeur_1", 0, estimate_tokens(result.get("raw", "")))
+        result = write_code(task, language=language, context=context, label="codeur_1")
+        self.watcher.track_call("codeur_1", tokens=result.get("tokens", 0))
         journal.append(
             record_entry(
                 "code",

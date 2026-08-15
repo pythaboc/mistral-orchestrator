@@ -19,7 +19,7 @@ import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from monitoring.metrics import estimate_tokens, record_tokens
+import live
 from tools.mistral_client import simple_prompt
 
 logger = logging.getLogger("orchestrator.watcher")
@@ -36,7 +36,7 @@ class Watcher:
 
     Usage :
         watcher = Watcher()
-        watcher.track_call("codeur_1", input_tokens=500, output_tokens=200)
+        watcher.track_call("codeur_1", tokens=520)  # vrais tokens de l'API
         watcher.check_budget()  # lève BudgetExceeded si dépassé
         report = watcher.analyze()  # analyse IA Small des tendances
     """
@@ -45,18 +45,23 @@ class Watcher:
     alert_pct: int = field(default_factory=lambda: int(os.getenv("ALERT_THRESHOLD_PCT", "70")))
     max_agent_calls: int = field(default_factory=lambda: int(os.getenv("MAX_AGENT_CALLS", "15")))
 
-    # Compteurs internes
+    # Compteurs internes (maintenant basés sur les VRAIS tokens de l'API)
     _tokens_by_agent: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     _calls_by_agent: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     _total_tokens: int = 0
     _alerts: list[str] = field(default_factory=list)
 
-    def track_call(self, agent_name: str, input_tokens: int, output_tokens: int) -> None:
-        """Enregistre un appel d'agent et sa consommation de tokens."""
-        tokens = input_tokens + output_tokens
-        self._tokens_by_agent[agent_name] += tokens
+    def track_call(self, agent_name: str, tokens: int = 0, *, input_tokens: int = 0, output_tokens: int = 0) -> None:
+        """
+        Enregistre un appel d'agent et sa consommation de tokens.
+
+        Accepte soit `tokens` (total), soit `input_tokens`+`output_tokens`.
+        Utilise les VRAIS compteurs retournés par l'API Mistral (CallResult).
+        """
+        total = tokens or (input_tokens + output_tokens)
+        self._tokens_by_agent[agent_name] += total
         self._calls_by_agent[agent_name] += 1
-        self._total_tokens += tokens
+        self._total_tokens += total
 
         # Détection de boucle : même agent appelé trop de fois
         if self._calls_by_agent[agent_name] == self.max_agent_calls:
@@ -66,6 +71,7 @@ class Watcher:
             )
             self._alerts.append(msg)
             logger.warning(msg)
+            live.agent_info("veilleur", msg)
 
     def check_budget(self) -> bool:
         """
@@ -78,6 +84,7 @@ class Watcher:
                 f"Arrêt forcé par le veilleur."
             )
             logger.critical(msg)
+            live.agent_error("veilleur", msg)
             raise BudgetExceeded(msg)
 
         alert_threshold = int(self.max_tokens * self.alert_pct / 100)
@@ -89,6 +96,7 @@ class Watcher:
             if msg not in self._alerts:
                 self._alerts.append(msg)
                 logger.warning(msg)
+                live.agent_info("veilleur", msg)
             return False
         return True
 
@@ -111,6 +119,7 @@ class Watcher:
         model = os.getenv("WATCHER_MODEL", "mistral-small-latest")
         usage = self.get_usage()
 
+        live.agent_start("veilleur", "Analyse des tendances de consommation", model=model)
         prompt = f"""Voici l'état de consommation d'une session d'agents IA :
 
 {usage}
@@ -122,5 +131,5 @@ Analyse :
 
 Sois bref (5 lignes max)."""
         analysis = simple_prompt(prompt, model=model, temperature=0.1)
-        record_tokens(model, estimate_tokens(prompt), estimate_tokens(analysis))
+        live.agent_done("veilleur", "Analyse terminée")
         return analysis

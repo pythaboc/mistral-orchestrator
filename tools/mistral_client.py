@@ -17,7 +17,7 @@ import logging
 import os
 import sqlite3
 import time
-from functools import lru_cache
+from dataclasses import dataclass, field
 from typing import Any
 
 from dotenv import load_dotenv
@@ -40,6 +40,17 @@ _client: Mistral | None = None
 # Cache SQLite optionnel (activé si MISTRAL_CACHE_DB est défini).
 # Contrairement au `lru_cache` en mémoire, il survit aux redémarrages.
 _CACHE_DB = os.getenv("MISTRAL_CACHE_DB", "cache.sqlite")
+
+
+@dataclass
+class CallResult:
+    """Résultat d'un appel Mistral, avec les vrais compteurs de tokens."""
+
+    content: str
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    from_cache: bool = False
 
 
 def _get_client() -> Mistral:
@@ -97,9 +108,9 @@ def chat_complete(
     temperature: float = 0.2,
     use_cache: bool = True,
     **kwargs: Any,
-) -> str:
+) -> CallResult:
     """
-    Appelle `client.chat.complete` et retourne le contenu textuel de la réponse.
+    Appelle `client.chat.complete` et retourne le contenu + les vrais tokens.
 
     Args:
         model: nom du modèle Mistral (ex: "mistral-large-latest").
@@ -109,14 +120,14 @@ def chat_complete(
         **kwargs: passés tels quels à l'API (max_tokens, tools, tool_choice, ...).
 
     Returns:
-        Le texte de la réponse du modèle.
+        CallResult avec le contenu et les compteurs de tokens réels (response.usage).
     """
     key = _cache_key(model, messages, temperature=temperature, **kwargs)
     if use_cache:
         cached = _cache_get(key)
         if cached is not None:
             logger.debug("Cache hit (model=%s)", model)
-            return cached
+            return CallResult(content=cached, from_cache=True)
 
     client = _get_client()
     response = client.chat.complete(
@@ -127,9 +138,20 @@ def chat_complete(
     )
     content = response.choices[0].message.content or ""
 
+    # Récupère les vrais compteurs de tokens depuis l'API (response.usage).
+    usage = getattr(response, "usage", None)
+    prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+    completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+    total_tokens = getattr(usage, "total_tokens", 0) or (prompt_tokens + completion_tokens)
+
     if use_cache:
         _cache_set(key, content)
-    return content
+    return CallResult(
+        content=content,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
 
 
 def simple_prompt(
@@ -140,9 +162,29 @@ def simple_prompt(
     temperature: float = 0.2,
     use_cache: bool = True,
 ) -> str:
-    """Raccourci : un seul prompt utilisateur -> réponse texte."""
+    """Raccourci : un seul prompt utilisateur -> réponse texte (sans les tokens)."""
     messages: list[dict] = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-    return chat_complete(model, messages, temperature=temperature, use_cache=use_cache)
+    return chat_complete(model, messages, temperature=temperature, use_cache=use_cache).content
+
+
+def simple_prompt_tracked(
+    prompt: str,
+    model: str,
+    *,
+    system: str | None = None,
+    temperature: float = 0.2,
+    use_cache: bool = True,
+) -> tuple[str, CallResult]:
+    """
+    Raccourci qui retourne aussi le CallResult (avec les vrais tokens).
+    Utilisé par les agents qui veulent remonter les compteurs réels.
+    """
+    messages: list[dict] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    result = chat_complete(model, messages, temperature=temperature, use_cache=use_cache)
+    return result.content, result

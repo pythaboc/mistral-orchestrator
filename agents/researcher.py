@@ -18,8 +18,8 @@ import os
 import re
 from typing import Any
 
-from monitoring.metrics import estimate_tokens, record_tokens
-from tools.mistral_client import _get_client
+import live
+from tools.mistral_client import CallResult, _get_client, chat_complete
 
 logger = logging.getLogger("orchestrator.researcher")
 
@@ -38,30 +38,42 @@ def search(query: str, *, max_results: int = 5) -> dict:
         max_results: nombre max de résultats pour le fallback Python.
 
     Returns:
-        {"answer": str, "sources": [{"title": ..., "url": ...}]}
+        {"answer": str, "sources": [{"title": ..., "url": ...}], "tokens": int}
     """
+    live.agent_start("chercheur", f"Recherche web : {query[:80]}", model=_MODEL)
     logger.info("Recherche lancée : %s", query[:80])
 
     # 1. Tentative via le websearch natif Mistral
     try:
         result = _search_native(query)
+        live.agent_done(
+            "chercheur",
+            f"{len(result.get('sources', []))} source(s) trouvée(s)",
+        )
         logger.info("Recherche web native Mistral réussie.")
         return result
     except Exception as exc:
         logger.warning(
             "Websearch natif Mistral indisponible (%s) -> fallback Python.", exc
         )
+        live.agent_info("chercheur", f"Websearch natif indisponible, fallback DuckDuckGo")
 
     # 2. Fallback Python (DuckDuckGo)
     try:
         result = _search_python_fallback(query, max_results=max_results)
+        live.agent_done(
+            "chercheur",
+            f"{len(result.get('sources', []))} source(s) (via DuckDuckGo)",
+        )
         logger.info("Recherche via fallback Python (DuckDuckGo) réussie.")
         return result
     except Exception as exc:
         logger.error("Échec de la recherche (fallback inclus) : %s", exc)
+        live.agent_error("chercheur", str(exc))
         return {
             "answer": f"Recherche impossible : {exc}",
             "sources": [],
+            "tokens": 0,
         }
 
 
@@ -118,9 +130,12 @@ def _search_native(query: str) -> dict:
         # Structure de réponse différente : on tente un fallback d'extraction.
         answer = _extract_any_text(response)
 
-    # Estimation grossière des tokens pour le suivi.
-    record_tokens(_MODEL, estimate_tokens(query), estimate_tokens(answer))
-    return {"answer": answer, "sources": sources}
+    # Estimation grossière des tokens pour le suivi (l'API Conversations ne
+    # renvoie pas toujours un usage détaillé comme chat.complete).
+    from monitoring.metrics import estimate_tokens
+    tokens = estimate_tokens(query) + estimate_tokens(answer)
+
+    return {"answer": answer, "sources": sources, "tokens": tokens}
 
 
 def _search_python_fallback(query: str, *, max_results: int) -> dict:
@@ -144,9 +159,9 @@ def _search_python_fallback(query: str, *, max_results: int) -> dict:
             )
 
     if not results_raw:
-        return {"answer": "Aucun résultat trouvé sur DuckDuckGo.", "sources": []}
+        return {"answer": "Aucun résultat trouvé sur DuckDuckGo.", "sources": [], "tokens": 0}
 
-    # Synthèse via le modèle Mistral.
+    # Synthèse via le modèle Mistral (avec les vrais compteurs de tokens).
     context = "\n\n".join(
         f"[{i+1}] {r['title']}\nURL: {r['url']}\n{r['body']}"
         for i, r in enumerate(results_raw)
@@ -158,17 +173,18 @@ Voici des résultats de recherche web :
 
 Synthétise une réponse concise à la question, en t'appuyant sur ces résultats.
 Cite les sources pertinentes par leur numéro entre crochets [1], [2], ..."""
-    client = _get_client()
-    response = client.chat.complete(
-        model=_MODEL,
-        messages=[{"role": "user", "content": prompt}],
+    result = chat_complete(
+        _MODEL,
+        [{"role": "user", "content": prompt}],
         temperature=0.3,
     )
-    answer = response.choices[0].message.content or ""
-    record_tokens(_MODEL, estimate_tokens(prompt), estimate_tokens(answer))
 
     sources = [{"title": r["title"], "url": r["url"]} for r in results_raw]
-    return {"answer": answer, "sources": sources}
+    return {
+        "answer": result.content,
+        "sources": sources,
+        "tokens": result.total_tokens,
+    }
 
 
 def _extract_any_text(response: Any) -> str:

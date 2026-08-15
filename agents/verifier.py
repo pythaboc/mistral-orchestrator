@@ -16,8 +16,8 @@ import logging
 import os
 import re
 
-from monitoring.metrics import estimate_tokens, record_tokens
-from tools.mistral_client import simple_prompt
+import live
+from tools.mistral_client import chat_complete
 
 logger = logging.getLogger("orchestrator.verifier")
 
@@ -58,17 +58,40 @@ def verify_code(code: str, *, task: str = "", language: str = "python") -> dict:
         language: langage du code.
 
     Returns:
-        Dictionnaire parsé : {verdict, issues, summary}.
+        Dictionnaire parsé : {verdict, issues, summary, tokens}.
     """
     prompt = f"""Vérifie ce code {language} de manière critique."""
     if task:
         prompt += f"\nTâche que le code devait résoudre : {task}"
     prompt += f"\n\n```{language}\n{code}\n```"
 
-    raw = simple_prompt(prompt, model=_MODEL, system=_SYSTEM, temperature=0.1)
-    record_tokens(_MODEL, estimate_tokens(prompt), estimate_tokens(raw))
+    live.agent_start("verificateur", "Vérification du code (recherche de bugs)", model=_MODEL)
 
-    return _parse_json(raw)
+    result = chat_complete(
+        _MODEL,
+        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": prompt}],
+        temperature=0.1,
+    )
+
+    parsed = _parse_json(result.content)
+    issues = parsed.get("issues", []) or []
+    verdict = parsed.get("verdict", "WARN")
+    live.agent_done(
+        "verificateur",
+        f"Verdict: {verdict} — {len(issues)} problème(s) trouvé(s)",
+        result=result,
+    )
+    # Affiche le détail des problèmes trouvés
+    for issue in issues[:5]:
+        sev = issue.get("severity", "?")
+        cat = issue.get("category", "?")
+        desc = issue.get("description", "")[:80]
+        live.agent_info("verificateur", f"[{sev}/{cat}] {desc}")
+    if len(issues) > 5:
+        live.agent_info("verificateur", f"... et {len(issues) - 5} autre(s)")
+
+    parsed["tokens"] = result.total_tokens
+    return parsed
 
 
 def _parse_json(text: str) -> dict:
