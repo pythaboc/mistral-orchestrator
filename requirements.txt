@@ -1,0 +1,11 @@
+# SDK officiel Mistral (chat.complete, agents, conversations, websearch)
+mistralai>=2.0.0
+
+# Gestion des variables d'environnement
+python-dotenv>=1.0.0
+
+# Recherche web de fallback (si websearch natif Mistral indisponible)
+ddgs>=9.0.0
+
+# Monitoring Prometheus - optionnel, requis pour monitoring/metrics.py
+prometheus-client>=0.20.0
