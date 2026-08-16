@@ -30,6 +30,15 @@ from agents.scribe import record_entry
 from agents.verifier import verify_code
 from agents.watcher import BudgetExceeded, Watcher
 from dotenv import load_dotenv
+from self_improve import (
+    get_preferences_for_brief,
+    improve_prompts,
+    learn_preferences,
+    load_prompt,
+    post_mortem,
+    post_mortem_to_dict,
+    record_feedback,
+)
 from tools.mistral_client import chat_complete
 
 load_dotenv()
@@ -104,6 +113,8 @@ class Orchestrator:
             _ORCHESTRATOR_MODEL,
             self.watcher.max_tokens,
         )
+        self._task_count = 0
+        self._improve_every = 5  # améliore les prompts toutes les 5 tâches
 
     def run(
         self,
@@ -232,6 +243,52 @@ class Orchestrator:
                 author="veilleur",
             )
         )
+
+        # --- Auto-amélioration (niveaux 1, 2, 3) ---
+        post_mortem_result = None
+        try:
+            # Niveau 2 : apprentissage des préférences utilisateur
+            self.watcher.check_budget()
+            learn_preferences(task, {
+                "final_code": current_code,
+                "verification": verification,
+                "iterations": iterations,
+            })
+
+            # Niveau 3 : post-mortem (méta-réflexion)
+            self.watcher.check_budget()
+            pm = post_mortem(task, plan, {
+                "final_code": current_code,
+                "verification": verification,
+                "iterations": iterations,
+            })
+            post_mortem_result = post_mortem_to_dict(pm)
+            self.watcher.track_call("orchestrateur", tokens=pm.tokens)
+
+            # Enregistrer les leçons dans le journal
+            journal_entries.append(
+                record_entry(
+                    "observation",
+                    f"Post-mortem: {pm.lessons}",
+                    author="orchestrateur",
+                )
+            )
+
+            # Niveau 1 : amélioration des prompts toutes les N tâches
+            self._task_count += 1
+            if self._task_count % self._improve_every == 0:
+                self.watcher.check_budget()
+                from agents.scribe import read_journal
+                improve_result = improve_prompts(read_journal())
+                journal_entries.append(
+                    record_entry(
+                        "decision",
+                        f"Auto-amélioration: {improve_result.get('summary', '')}",
+                        author="orchestrateur",
+                    )
+                )
+        except Exception as exc:
+            logger.warning("Auto-amélioration échouée (non bloquant) : %s", exc)
 
         return TaskResult(
             task=task,

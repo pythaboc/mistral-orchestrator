@@ -4,6 +4,8 @@ Codeur : écrit du code en réponse à une tâche.
 Utilise Mistral Medium (optimisé code/agentic, dialogue natif).
 Deux instances peuvent travailler en parallèle sur la même tâche
 pour diverger puis laisser le vérificateur arbitrer.
+
+Le prompt système est lu depuis prompts/coder.txt (modifiable par auto-amélioration).
 """
 
 from __future__ import annotations
@@ -13,13 +15,14 @@ import os
 import re
 
 import live
-from tools.mistral_client import CallResult, chat_complete
+from self_improve import load_prompt
+from tools.mistral_client import chat_complete
 
 logger = logging.getLogger("orchestrator.coder")
 
 _MODEL = os.getenv("CODER_MODEL", "mistral-medium-latest")
 
-_SYSTEM = """Tu es un codeur expert. Tu écris du code propre, idiomatique et
+_FALLBACK_SYSTEM = """Tu es un codeur expert. Tu écris du code propre, idiomatique et
 correct pour répondre à une tâche.
 
 Règles :
@@ -28,6 +31,11 @@ Règles :
 - Inclue les imports nécessaires.
 - Si la tâche est ambiguë, fais un choix raisonnable et note-le en commentaire.
 - Ne retourne QUE le code (avec ses commentaires), pas d'explication hors bloc."""
+
+
+def _get_system_prompt() -> str:
+    """Charge le prompt depuis prompts/coder.txt (ou fallback)."""
+    return load_prompt("coder", _FALLBACK_SYSTEM)
 
 
 def write_code(task: str, *, language: str = "python", context: str = "", label: str = "codeur") -> dict:
@@ -51,7 +59,7 @@ def write_code(task: str, *, language: str = "python", context: str = "", label:
 
     result = chat_complete(
         _MODEL,
-        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": prompt}],
+        [{"role": "system", "content": _get_system_prompt()}, {"role": "user", "content": prompt}],
         temperature=0.3,
     )
 
@@ -75,5 +83,4 @@ def _extract_code_block(text: str) -> str:
     match = re.search(r"```(?:\w+)?\s*\n(.*?)```", text, re.DOTALL)
     if match:
         return match.group(1).strip()
-    # Pas de bloc : on retourne tout (le modèle a peut-être oublié les backticks).
     return text.strip()

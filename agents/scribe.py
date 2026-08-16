@@ -7,6 +7,8 @@ et catégorisée (décision / observation / alerte / recherche / code).
 
 Le scribe est aussi un agent IA Small : il reçoit un texte brut et le
 résume/formate en une entrée de journal concise avant de l'écrire.
+
+Les prompts sont lus depuis prompts/ (modifiables par auto-amélioration).
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import subprocess
 from datetime import datetime
 
 import live
+from self_improve import load_prompt
 from tools.mistral_client import chat_complete
 
 logger = logging.getLogger("orchestrator.scribe")
@@ -24,7 +27,7 @@ logger = logging.getLogger("orchestrator.scribe")
 _JOURNAL_PATH = os.getenv("SCRIBE_JOURNAL", "journal.md")
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-_SYSTEM = """Tu es le scribe d'une équipe d'agents IA. Ton rôle : synthétiser
+_FALLBACK_SYSTEM = """Tu es le scribe d'une équipe d'agents IA. Ton rôle : synthétiser
 une information brute en une entrée de journal concise et utile pour la
 mémoire du projet.
 
@@ -35,7 +38,7 @@ Règles :
 - Retourne UNIQUEMENT le texte de l'entrée de journal, sans préambule,
   sans titre, sans markdown superflu. Une entrée doit tenir en un paragraphe."""
 
-_SUMMARY_SYSTEM = """Tu es le scribe d'une équipe d'agents IA. Tu relis le
+_FALLBACK_SUMMARY_SYSTEM = """Tu es le scribe d'une équipe d'agents IA. Tu relis le
 journal du projet pour préparer un résumé de la dernière session à destination
 de l'utilisateur qui revient.
 
@@ -46,40 +49,22 @@ Règles :
   première session.
 - Sois chaleureux mais factuel. Pas de markdown, juste du texte."""
 
-_SUMMARY_CONVERSATION_SYSTEM = """Tu es le scribe d'une équipe d'agents IA.
+_FALLBACK_CONV_SYSTEM = """Tu es le scribe d'une équipe d'agents IA.
 On te donne l'historique d'une conversation entre l'utilisateur et l'orchestrateur.
 Résume-le en un contexte concis (max 500 mots) qui permettra à l'orchestrateur
 de reprendre la conversation sans perdre le fil. Conserve les décisions clés,
 les tâches en cours, les préférences de l'utilisateur. Pas de markdown."""
 
 
-def record_entry(
-    category: str,
-    content: str,
-    *,
-    author: str = "orchestrateur",
-    commit: bool = True,
-) -> str:
-    """
-    Enregistre une entrée dans le journal.
-
-    Args:
-        category: "decision" | "observation" | "alerte" | "recherche" | "code" | "session".
-        content: texte brut à mémoriser.
-        author: qui prend la décision (nom de l'agent ou "humain").
-        commit: si True, fait un git commit du journal après écriture (seulement
-            si le repo a un remote configuré, pour éviter le warning).
-
-    Returns:
-        L'entrée formatée telle qu'écrite dans le journal.
-    """
+def record_entry(category: str, content: str, *, author: str = "orchestrateur", commit: bool = True) -> str:
+    """Enregistre une entrée dans le journal."""
     model = os.getenv("SCRIBE_MODEL", "mistral-small-latest")
     live.agent_start("scribe", f"Enregistrement : {category}", model=model)
 
-    # Le scribe synthétise l'entrée via le modèle Small (léger, peu coûteux).
+    system_prompt = load_prompt("scribe", _FALLBACK_SYSTEM)
     result = chat_complete(
         model,
-        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": content}],
+        [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}],
         temperature=0.1,
     )
     summarized = result.content
@@ -97,9 +82,7 @@ def record_entry(
 
 
 def read_journal() -> str:
-    """
-    Retourne le contenu brut du journal, ou une chaîne vide s'il n'existe pas.
-    """
+    """Retourne le contenu brut du journal, ou une chaîne vide s'il n'existe pas."""
     if not os.path.exists(_JOURNAL_PATH):
         return ""
     try:
@@ -111,10 +94,7 @@ def read_journal() -> str:
 
 
 def summarize_previous_session() -> str:
-    """
-    Génère un résumé de la dernière session à partir du journal.
-    Si le journal est vide, indique qu'il s'agit de la première session.
-    """
+    """Génère un résumé de la dernière session à partir du journal."""
     model = os.getenv("SCRIBE_MODEL", "mistral-small-latest")
     journal = read_journal()
 
@@ -132,9 +112,10 @@ def summarize_previous_session() -> str:
         "(les entrées les plus récentes) en 3 à 6 lignes."
     )
     live.agent_start("scribe", "Lecture du journal pour le résumé de session", model=model)
+    system_prompt = load_prompt("scribe_summary", _FALLBACK_SUMMARY_SYSTEM)
     result = chat_complete(
         model,
-        [{"role": "system", "content": _SUMMARY_SYSTEM}, {"role": "user", "content": prompt}],
+        [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
         temperature=0.2,
     )
     live.agent_done("scribe", "Résumé de la dernière session généré", result=result)
@@ -142,29 +123,17 @@ def summarize_previous_session() -> str:
 
 
 def summarize_conversation(history: list[dict]) -> str:
-    """
-    Résume l'historique d'une conversation pour éviter que le contexte
-    ne grossisse indéfiniment. Utilisé par l'orchestrateur quand la
-    conversation devient trop longue.
-
-    Args:
-        history: liste de messages [{"role": "user"|"assistant", "content": "..."}]
-
-    Returns:
-        Un résumé concis qui remplace l'historique.
-    """
+    """Résume l'historique d'une conversation pour éviter que le contexte ne grossisse."""
     if not history:
         return ""
 
     model = os.getenv("SCRIBE_MODEL", "mistral-small-latest")
-    # Formate l'historique en texte
-    conv_text = "\n\n".join(
-        f"[{m['role'].upper()}] {m['content']}" for m in history
-    )
+    conv_text = "\n\n".join(f"[{m['role'].upper()}] {m['content']}" for m in history)
     prompt = f"Voici l'historique de la conversation à résumer :\n\n{conv_text}\n\nRésume ce contexte de manière concise."
+    system_prompt = load_prompt("scribe_conv", _FALLBACK_CONV_SYSTEM)
     result = chat_complete(
         model,
-        [{"role": "system", "content": _SUMMARY_CONVERSATION_SYSTEM}, {"role": "user", "content": prompt}],
+        [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
         temperature=0.2,
     )
     return result.content
@@ -180,18 +149,9 @@ def _append_to_journal(entry: str) -> None:
 
 
 def _git_repo_has_remote() -> bool:
-    """
-    Vérifie si le repo git a au moins un remote configuré.
-    Évite le warning quand on n'est pas dans un repo partagé.
-    """
+    """Vérifie si le repo git a au moins un remote configuré."""
     try:
-        result = subprocess.run(
-            ["git", "remote"],
-            cwd=_PROJECT_DIR,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        result = subprocess.run(["git", "remote"], cwd=_PROJECT_DIR, capture_output=True, text=True, timeout=5)
         return result.returncode == 0 and result.stdout.strip() != ""
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return False
@@ -200,18 +160,8 @@ def _git_repo_has_remote() -> bool:
 def _git_commit_journal(*, entry_summary: str) -> bool:
     """Commit le journal avec git. Échoue silencieusement sinon."""
     try:
-        subprocess.run(
-            ["git", "add", _JOURNAL_PATH],
-            cwd=_PROJECT_DIR,
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "commit", "-m", f"scribe: {entry_summary}"],
-            cwd=_PROJECT_DIR,
-            check=True,
-            capture_output=True,
-        )
+        subprocess.run(["git", "add", _JOURNAL_PATH], cwd=_PROJECT_DIR, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", f"scribe: {entry_summary}"], cwd=_PROJECT_DIR, check=True, capture_output=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         logger.warning("Commit git du journal échoué : %s", exc)

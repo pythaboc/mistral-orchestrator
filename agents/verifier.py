@@ -6,7 +6,7 @@ Il cherche activement les bugs, failles de sécurité, edge cases,
 et erreurs de logique. C'est le "deuxième avis qui essaie de te donner tort"
 (le principe de @powl_d).
 
-Retourne un verdict structuré (JSON) : OK / WARN / FAIL + liste des problèmes.
+Le prompt système est lu depuis prompts/verifier.txt (modifiable par auto-amélioration).
 """
 
 from __future__ import annotations
@@ -17,13 +17,14 @@ import os
 import re
 
 import live
+from self_improve import load_prompt
 from tools.mistral_client import chat_complete
 
 logger = logging.getLogger("orchestrator.verifier")
 
 _MODEL = os.getenv("VERIFIER_MODEL", "mistral-medium-latest")
 
-_SYSTEM = """Tu es un vérificateur de code rigoureux. Ton but N'EST PAS de
+_FALLBACK_SYSTEM = """Tu es un vérificateur de code rigoureux. Ton but N'EST PAS de
 confirmer que le code est correct, mais de chercher activement les bugs,
 failles de sécurité, edge cases non gérés, erreurs de logique et mauvaises
 pratiques.
@@ -48,6 +49,11 @@ Si le code est réellement correct, retourne {"verdict":"OK","issues":[],"summar
 Ne sois JAMAIS complaisant : si tu vois un risque potentiel, signale-le."""
 
 
+def _get_system_prompt() -> str:
+    """Charge le prompt depuis prompts/verifier.txt (ou fallback)."""
+    return load_prompt("verifier", _FALLBACK_SYSTEM)
+
+
 def verify_code(code: str, *, task: str = "", language: str = "python") -> dict:
     """
     Vérifie un bloc de code en cherchant activement les problèmes.
@@ -69,7 +75,7 @@ def verify_code(code: str, *, task: str = "", language: str = "python") -> dict:
 
     result = chat_complete(
         _MODEL,
-        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": prompt}],
+        [{"role": "system", "content": _get_system_prompt()}, {"role": "user", "content": prompt}],
         temperature=0.1,
     )
 
@@ -81,7 +87,6 @@ def verify_code(code: str, *, task: str = "", language: str = "python") -> dict:
         f"Verdict: {verdict} — {len(issues)} problème(s) trouvé(s)",
         result=result,
     )
-    # Affiche le détail des problèmes trouvés
     for issue in issues[:5]:
         sev = issue.get("severity", "?")
         cat = issue.get("category", "?")
