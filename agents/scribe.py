@@ -46,6 +46,12 @@ Règles :
   première session.
 - Sois chaleureux mais factuel. Pas de markdown, juste du texte."""
 
+_SUMMARY_CONVERSATION_SYSTEM = """Tu es le scribe d'une équipe d'agents IA.
+On te donne l'historique d'une conversation entre l'utilisateur et l'orchestrateur.
+Résume-le en un contexte concis (max 500 mots) qui permettra à l'orchestrateur
+de reprendre la conversation sans perdre le fil. Conserve les décisions clés,
+les tâches en cours, les préférences de l'utilisateur. Pas de markdown."""
+
 
 def record_entry(
     category: str,
@@ -61,7 +67,8 @@ def record_entry(
         category: "decision" | "observation" | "alerte" | "recherche" | "code" | "session".
         content: texte brut à mémoriser.
         author: qui prend la décision (nom de l'agent ou "humain").
-        commit: si True, fait un git commit du journal après écriture.
+        commit: si True, fait un git commit du journal après écriture (seulement
+            si le repo a un remote configuré, pour éviter le warning).
 
     Returns:
         L'entrée formatée telle qu'écrite dans le journal.
@@ -84,7 +91,7 @@ def record_entry(
     logger.info("Entrée de journal enregistrée (%s)", category)
     live.agent_done("scribe", "Entrée ajoutée au journal", result=result)
 
-    if commit:
+    if commit and _git_repo_has_remote():
         _git_commit_journal(entry_summary=f"{category} par {author}")
     return entry
 
@@ -92,8 +99,6 @@ def record_entry(
 def read_journal() -> str:
     """
     Retourne le contenu brut du journal, ou une chaîne vide s'il n'existe pas.
-
-    C'est la base utilisée pour générer le résumé de la dernière session.
     """
     if not os.path.exists(_JOURNAL_PATH):
         return ""
@@ -108,12 +113,7 @@ def read_journal() -> str:
 def summarize_previous_session() -> str:
     """
     Génère un résumé de la dernière session à partir du journal.
-
-    Utilise le modèle Small pour synthétiser l'historique. Si le journal est
-    vide, indique qu'il s'agit de la première session.
-
-    Returns:
-        Un résumé de 3 à 6 lignes de ce qui a été fait la dernière fois.
+    Si le journal est vide, indique qu'il s'agit de la première session.
     """
     model = os.getenv("SCRIBE_MODEL", "mistral-small-latest")
     journal = read_journal()
@@ -141,6 +141,35 @@ def summarize_previous_session() -> str:
     return result.content
 
 
+def summarize_conversation(history: list[dict]) -> str:
+    """
+    Résume l'historique d'une conversation pour éviter que le contexte
+    ne grossisse indéfiniment. Utilisé par l'orchestrateur quand la
+    conversation devient trop longue.
+
+    Args:
+        history: liste de messages [{"role": "user"|"assistant", "content": "..."}]
+
+    Returns:
+        Un résumé concis qui remplace l'historique.
+    """
+    if not history:
+        return ""
+
+    model = os.getenv("SCRIBE_MODEL", "mistral-small-latest")
+    # Formate l'historique en texte
+    conv_text = "\n\n".join(
+        f"[{m['role'].upper()}] {m['content']}" for m in history
+    )
+    prompt = f"Voici l'historique de la conversation à résumer :\n\n{conv_text}\n\nRésume ce contexte de manière concise."
+    result = chat_complete(
+        model,
+        [{"role": "system", "content": _SUMMARY_CONVERSATION_SYSTEM}, {"role": "user", "content": prompt}],
+        temperature=0.2,
+    )
+    return result.content
+
+
 def _append_to_journal(entry: str) -> None:
     """Ajoute l'entrée au fichier journal.md (le crée s'il n'existe pas)."""
     header = ""
@@ -150,13 +179,27 @@ def _append_to_journal(entry: str) -> None:
         f.write(header + entry + "\n")
 
 
-def _git_commit_journal(*, entry_summary: str) -> bool:
+def _git_repo_has_remote() -> bool:
     """
-    Commit le journal avec git. Échoue silencieusement si git n'est pas
-    disponible ou si le répertoire n'est pas un dépôt git.
+    Vérifie si le repo git a au moins un remote configuré.
+    Évite le warning quand on n'est pas dans un repo partagé.
     """
     try:
-        # On s'assure d'être dans le répertoire du projet.
+        result = subprocess.run(
+            ["git", "remote"],
+            cwd=_PROJECT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0 and result.stdout.strip() != ""
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return False
+
+
+def _git_commit_journal(*, entry_summary: str) -> bool:
+    """Commit le journal avec git. Échoue silencieusement sinon."""
+    try:
         subprocess.run(
             ["git", "add", _JOURNAL_PATH],
             cwd=_PROJECT_DIR,
@@ -164,12 +207,7 @@ def _git_commit_journal(*, entry_summary: str) -> bool:
             capture_output=True,
         )
         subprocess.run(
-            [
-                "git",
-                "commit",
-                "-m",
-                f"scribe: {entry_summary}",
-            ],
+            ["git", "commit", "-m", f"scribe: {entry_summary}"],
             cwd=_PROJECT_DIR,
             check=True,
             capture_output=True,

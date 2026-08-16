@@ -7,5 +7,8 @@ python-dotenv>=1.0.0
 # Recherche web de fallback (si websearch natif Mistral indisponible)
 ddgs>=9.0.0
 
-# Monitoring Prometheus - optionnel, requis pour monitoring/metrics.py
+# Interface web Flask (pour le mode --web)
+flask>=3.0.0
+
+# Monitoring Prometheus - optionnel
 prometheus-client>=0.20.0

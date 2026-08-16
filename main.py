@@ -4,6 +4,7 @@ Point d'entrée de l'orchestrateur d'équipe d'agents Mistral.
 Modes d'exécution :
     python main.py                    # mode interactif (REPL avec mémoire)
     python main.py "ta tâche"         # une seule tâche puis exit
+    python main.py --web              # lance l'interface web (http://localhost:5000)
     python main.py --one-coder "..."  # une tâche, un seul codeur
 
 En mode interactif, l'utilisateur arrive sur une fenêtre de discussion avec :
@@ -21,8 +22,13 @@ import logging
 import sys
 
 from agents.scribe import record_entry, summarize_previous_session
-from agents.watcher import BudgetExceeded
+from agents.watcher import BudgetExceeded, Watcher
+from budget import BudgetManager
+from conversation import ConversationManager
+from dotenv import load_dotenv
 from orchestrator import Orchestrator
+
+load_dotenv()
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -43,13 +49,24 @@ def print_banner() -> None:
     print("=" * 60)
 
 
+def print_budget_status(budget: BudgetManager) -> None:
+    """Affiche un résumé du budget mensuel au démarrage."""
+    s = budget.status()
+    print(f"\n💰 Budget mensuel : {s.used_30d:,}/{s.monthly_budget:,} tokens ({s.pct_used}%)")
+    print(f"   Reste utilisable : {s.usable_remaining:,} tokens (réserve {s.safety_reserve:,})")
+    daily = budget.daily_budget()
+    print(f"   Budget du jour : {daily:,} tokens")
+
+
 def print_help() -> None:
     print()
     print("Commandes disponibles :")
     print("  <ta tâche>     — décrit ce que tu veux faire, l'orchestrateur s'occupe du reste")
     print("  /help          — affiche cette aide")
-    print("  /usage         — affiche la consommation de tokens (veilleur)")
+    print("  /usage         — affiche la consommation de tokens (session + mois)")
+    print("  /budget        — affiche l'état du budget mensuel")
     print("  /journal       — affiche le journal complet du projet")
+    print("  /reset         — vide l'historique de la conversation (garde le journal)")
     print("  /exit  (ou /quit) — quitte (le scribe enregistre un récapitulatif)")
     print()
 
@@ -59,7 +76,6 @@ def print_result(result) -> None:
     print()
     print("─" * 60)
 
-    # Plan de l'orchestrateur
     if result.plan:
         print()
         print("📋 Plan de l'orchestrateur :")
@@ -112,31 +128,44 @@ def print_result(result) -> None:
     print("─" * 60)
 
 
-def run_one_task(orch: Orchestrator, task: str, *, one_coder: bool, max_iter: int) -> None:
+def run_one_task(orch: Orchestrator, task: str, budget: BudgetManager,
+                 conv: ConversationManager, *, one_coder: bool, max_iter: int) -> None:
     """Exécute une tâche via l'orchestrateur et affiche le résultat."""
+    # Vérifie le budget mensuel avant de lancer
+    if not budget.can_spend(10000):
+        print("\n🛑 Budget mensuel insuffisant (réserve de sécurité menacée)", file=sys.stderr)
+        print_budget_status(budget)
+        return
+    conv.add_user(task)
     try:
-        result = orch.run(
-            task,
-            use_two_coders=not one_coder,
-            max_iterations=max_iter,
-        )
+        result = orch.run(task, use_two_coders=not one_coder, max_iterations=max_iter)
     except BudgetExceeded as exc:
         print(f"\n🛑 {exc}", file=sys.stderr)
         return
     except Exception as exc:
         print(f"\n❌ Erreur pendant l'orchestration : {exc}", file=sys.stderr)
         return
+
+    # Enregistre la consommation dans le budget mensuel
+    by_agent = result.watcher.get("by_agent", {}) or {}
+    for agent, tokens in by_agent.items():
+        budget.record(agent, "mixed", tokens)
+
     print_result(result)
+    response = (
+        f"Plan : {result.plan[:200]}\n"
+        f"Verdict : {result.verification.get('verdict', '?')} ({result.iterations} itération(s))\n"
+        f"Code :\n{result.final_code}"
+    )
+    conv.add_assistant(response)
 
 
-def interactive_loop(orch: Orchestrator, *, max_iter: int) -> int:
-    """
-    Mode interactif : message d'accueil + résumé de la dernière session +
-    boucle de conversation.
-    """
+def interactive_loop(orch: Orchestrator, budget: BudgetManager,
+                     conv: ConversationManager, *, max_iter: int) -> int:
+    """Mode interactif : message d'accueil + résumé + boucle de conversation."""
     print_banner()
+    print_budget_status(budget)
 
-    # Résumé de la dernière session lu depuis le journal par le scribe.
     print()
     print("📝 Mémoire de la dernière session :")
     try:
@@ -164,7 +193,7 @@ def interactive_loop(orch: Orchestrator, *, max_iter: int) -> int:
             continue
 
         if user_input in ("/exit", "/quit"):
-            _on_exit(orch)
+            _on_exit(orch, budget, conv)
             print("À bientôt ! 👋")
             return 0
 
@@ -173,8 +202,14 @@ def interactive_loop(orch: Orchestrator, *, max_iter: int) -> int:
             continue
 
         if user_input == "/usage":
-            usage = orch.watcher.get_usage()
-            print(json.dumps(usage, ensure_ascii=False, indent=2))
+            print("\n--- Session ---")
+            print(json.dumps(orch.watcher.get_usage(), ensure_ascii=False, indent=2))
+            print("\n--- Mensuel ---")
+            print(json.dumps(budget.to_dict(), ensure_ascii=False, indent=2))
+            continue
+
+        if user_input == "/budget":
+            print_budget_status(budget)
             continue
 
         if user_input == "/journal":
@@ -184,22 +219,45 @@ def interactive_loop(orch: Orchestrator, *, max_iter: int) -> int:
             print(journal if journal else "(journal vide)")
             continue
 
+        if user_input == "/reset":
+            conv.reset()
+            print("🔄 Historique de conversation réinitialisé (le journal est conservé).")
+            continue
+
         if user_input.startswith("/"):
             print(f"Commande inconnue : {user_input} (essaie /help)")
             continue
 
-        # Une tâche : on la lance.
-        run_one_task(orch, user_input, one_coder=False, max_iter=max_iter)
+        run_one_task(orch, user_input, budget, conv, one_coder=False, max_iter=max_iter)
 
 
-def _on_exit(orch: Orchestrator) -> None:
+def run_web(budget: BudgetManager, conv: ConversationManager, port: int) -> int:
+    """Lance l'interface web Flask."""
+    try:
+        from web.app import init, run
+    except ImportError as exc:
+        print(f"❌ Flask non installé. Installe-le : pip install flask\n   ({exc})",
+              file=sys.stderr)
+        return 1
+
+    orch = Orchestrator()
+    init(budget_manager=budget, watcher=orch.watcher, conversation=conv, orchestrator=orch)
+    print_banner()
+    print_budget_status(budget)
+    print(f"\n🌐 Interface web disponible sur http://localhost:{port}")
+    run(port=port)
+    return 0
+
+
+def _on_exit(orch: Orchestrator, budget: BudgetManager, conv: ConversationManager) -> None:
     """À la sortie, le scribe enregistre un récapitulatif de session."""
     usage = orch.watcher.get_usage()
+    bstatus = budget.status()
     recap = (
-        f"Fin de session. Tokens consommés : {usage.get('total_tokens', 0)}/"
-        f"{usage.get('max_tokens', '?')} ({usage.get('pct_used', 0)}%). "
-        f"Alertes : {len(usage.get('alerts', []))}. "
-        f"Analyse du veilleur : {usage.get('analysis', 'n/a')[:150]}"
+        f"Fin de session. Tokens session: {usage.get('total_tokens', 0)}. "
+        f"Tokens mois: {bstatus.used_30d}/{bstatus.monthly_budget} ({bstatus.pct_used}%). "
+        f"Reste: {bstatus.usable_remaining}. "
+        f"Analyse veilleur: {usage.get('analysis', 'n/a')[:150]}"
     )
     try:
         record_entry("session", recap, author="veilleur")
@@ -219,10 +277,14 @@ def main() -> int:
         "--one-coder", action="store_true", help="Un seul codeur (au lieu de 2)"
     )
     parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=3,
+        "--max-iterations", type=int, default=3,
         help="Max de cycles code->vérification",
+    )
+    parser.add_argument(
+        "--web", action="store_true", help="Lance l'interface web au lieu du REPL"
+    )
+    parser.add_argument(
+        "--port", type=int, default=5000, help="Port pour l'interface web"
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Logs détaillés"
@@ -230,16 +292,21 @@ def main() -> int:
     args = parser.parse_args()
 
     setup_logging(args.verbose)
+
+    budget = BudgetManager()
+    conv = ConversationManager()
     orch = Orchestrator()
 
-    # Mode non-interactif : une tâche puis exit.
+    if args.web:
+        return run_web(budget, conv, args.port)
+
     if args.task:
-        run_one_task(orch, args.task, one_coder=args.one_coder, max_iter=args.max_iterations)
-        _on_exit(orch)
+        run_one_task(orch, args.task, budget, conv,
+                     one_coder=args.one_coder, max_iter=args.max_iterations)
+        _on_exit(orch, budget, conv)
         return 0
 
-    # Mode interactif (REPL).
-    return interactive_loop(orch, max_iter=args.max_iterations)
+    return interactive_loop(orch, budget, conv, max_iter=args.max_iterations)
 
 
 if __name__ == "__main__":
