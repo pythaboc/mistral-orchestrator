@@ -23,7 +23,12 @@ import threading
 from typing import Any
 
 from dotenv import load_dotenv
+import logging as _logging
 from flask import Flask, jsonify, request, send_from_directory
+
+# Filtre les logs HTTP de werkzeug (GET /api/*) pour éviter le spam dans la console
+_werkzeug_logger = _logging.getLogger("werkzeug")
+_werkzeug_logger.setLevel(_logging.ERROR)  # Only show real errors, not each request
 
 load_dotenv()
 
@@ -87,23 +92,26 @@ def api_chat():
         try:
             _conversation.add_user(message)
             result = _orchestrator.run(message, use_two_coders=True, max_iterations=3)
+
+            # Enregistre la consommation dans le budget mensuel
+            if _budget_manager:
+                by_agent = result.watcher.get("by_agent", {}) or {}
+                for agent, tokens in by_agent.items():
+                    _budget_manager.record(agent, "mixed", tokens)
+
+            # Le résultat est affiché UNE SEULE fois par le frontend (via /api/status)
+            # On ne l'ajoute PAS à la conversation pour éviter la répétition
             _current_task_status["result"] = {
                 "final_code": result.final_code,
                 "verification": result.verification,
                 "iterations": result.iterations,
                 "plan": result.plan,
                 "watcher": result.watcher,
+                "journal_entries": len(result.journal_entries),
             }
-            response = (
-                f"Plan : {result.plan[:200]}\n"
-                f"Verdict : {result.verification.get('verdict', '?')} ({result.iterations} itération(s))\n"
-                f"Code :\n{result.final_code}"
-            )
-            _conversation.add_assistant(response)
         except Exception as exc:
             logger.error("Erreur tâche : %s", exc, exc_info=True)
             _current_task_status["result"] = {"error": str(exc)}
-            _conversation.add_assistant(f"Erreur : {exc}")
         finally:
             _current_task_status["running"] = False
 

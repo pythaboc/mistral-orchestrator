@@ -127,15 +127,16 @@ async function fetchUsage() {
   } catch(e) {}
 }
 
+var _resultDisplayed = false;
 async function fetchStatus() {
   try {
     const r = await fetch('/api/status');
     const d = await r.json();
     const badge = document.getElementById('taskStatus');
-    if (d.running) { badge.textContent='En cours'; badge.className='status-badge status-running'; }
+    if (d.running) { badge.textContent='En cours'; badge.className='status-badge status-running'; _resultDisplayed=false; }
     else { badge.textContent='Inactif'; badge.className='status-badge status-idle'; }
-    if (d.result && !d.result.fetched) {
-      d.result.fetched = true;
+    if (d.result && !_resultDisplayed) {
+      _resultDisplayed = true;
       addMsg('bot', formatResult(d.result));
       document.getElementById('sendBtn').disabled = false;
       fetchUsage();
