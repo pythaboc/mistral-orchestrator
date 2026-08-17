@@ -204,6 +204,18 @@ function formatResult(r) {
   var txt = '📋 Plan : ' + (r.plan||'').slice(0,200) + '\n\n';
   txt += '✅ Verdict : ' + ((r.verification||{}).verdict||'?') + ' (' + (r.iterations||0) + ' itération(s))\n\n';
   txt += '```\n' + (r.final_code||'') + '\n```';
+  // Auto-amélioration (visible)
+  var si = r.self_improvement || {};
+  if (si.preferences || si.post_mortem || si.prompts_improved) {
+    txt += '\n\n---\n🧠 Auto-amélioration :';
+    if (si.preferences) txt += '\n📚 Préférence apprise : ' + si.preferences.slice(0,150);
+    if (si.post_mortem && si.post_mortem.lessons) txt += '\n💭 Post-mortem : ' + si.post_mortem.lessons.slice(0,200);
+    if (si.prompts_improved && si.prompts_improved.summary) {
+      txt += '\n📝 Prompts améliorés : ' + si.prompts_improved.summary.slice(0,200);
+      var changes = si.prompts_improved.changes || {};
+      for (var k in changes) { if (changes[k]) txt += '\n  ✓ ' + k; }
+    }
+  }
   return txt;
 }
 

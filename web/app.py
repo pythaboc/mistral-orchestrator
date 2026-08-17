@@ -110,6 +110,7 @@ def api_chat():
                 "plan": result.plan,
                 "watcher": result.watcher,
                 "journal_entries": len(result.journal_entries),
+                "self_improvement": result.self_improvement,
             }
         except Exception as exc:
             logger.error("Erreur tâche : %s", exc, exc_info=True)

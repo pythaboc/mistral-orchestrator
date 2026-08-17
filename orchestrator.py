@@ -81,6 +81,7 @@ class TaskResult:
     verification: dict = field(default_factory=dict)
     iterations: int = 0
     watcher: dict = field(default_factory=dict)
+    self_improvement: dict = field(default_factory=dict)
     journal_entries: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -271,15 +272,18 @@ class Orchestrator:
         )
 
         # --- Auto-amélioration (niveaux 1, 2, 3) ---
-        post_mortem_result = None
+        improvement_info = {"preferences": None, "post_mortem": None, "prompts_improved": None}
         try:
             # Niveau 2 : apprentissage des préférences utilisateur
             self.watcher.check_budget()
-            learn_preferences(task, {
+            new_prefs = learn_preferences(task, {
                 "final_code": current_code,
                 "verification": verification,
                 "iterations": iterations,
             })
+            if new_prefs:
+                improvement_info["preferences"] = new_prefs
+                live.agent_info("orchestrateur", f"📚 Préférence apprise: {new_prefs[:80]}")
 
             # Niveau 3 : post-mortem (méta-réflexion)
             self.watcher.check_budget()
@@ -288,10 +292,10 @@ class Orchestrator:
                 "verification": verification,
                 "iterations": iterations,
             })
-            post_mortem_result = post_mortem_to_dict(pm)
+            improvement_info["post_mortem"] = post_mortem_to_dict(pm)
             self.watcher.track_call("orchestrateur", tokens=pm.tokens)
+            live.agent_info("orchestrateur", f"💭 Post-mortem: {pm.lessons[:80]}")
 
-            # Enregistrer les leçons dans le journal
             journal_entries.append(
                 record_entry(
                     "observation",
@@ -306,10 +310,14 @@ class Orchestrator:
                 self.watcher.check_budget()
                 from agents.scribe import read_journal
                 improve_result = improve_prompts(read_journal())
+                improvement_info["prompts_improved"] = {
+                    "summary": improve_result.get("summary", ""),
+                    "changes": improve_result.get("changes", {}),
+                }
                 journal_entries.append(
                     record_entry(
                         "decision",
-                        f"Auto-amélioration: {improve_result.get('summary', '')}",
+                        f"Auto-amélioration prompts: {improve_result.get('summary', '')}",
                         author="orchestrateur",
                     )
                 )
@@ -320,6 +328,7 @@ class Orchestrator:
             task=task,
             task_type="code",
             plan=plan,
+            self_improvement=improvement_info,
             research=research,
             code_candidates=code_candidates,
             chosen_candidate=chosen_idx,

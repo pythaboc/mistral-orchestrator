@@ -195,7 +195,17 @@ Réponds en JSON :
     else:
         live.agent_done("orchestrateur", "Aucune amélioration nécessaire", result=result)
 
-    return {"improved": improved, "summary": summary}
+    # Récupère les anciens prompts pour le diff
+    old_prompts = {}
+    for name in _IMPROVABLE_PROMPTS:
+        old_prompts[name] = current_prompts.get(name, "")
+
+    return {
+        "improved": improved,
+        "summary": summary,
+        "old_prompts": old_prompts,
+        "changes": {name: improved.get(name, False) for name in _IMPROVABLE_PROMPTS},
+    }
 
 
 def _save_prompt(name: str, content: str) -> None:
