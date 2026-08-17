@@ -376,16 +376,23 @@ Réponds UNIQUEMENT avec le mot de la catégorie (code, research, info, ou chat)
         de clarification si nécessaire. Retourne None si tout est clair.
         """
         live.agent_start("orchestrateur", "Vérification : la demande est-elle claire ?", model=_ORCHESTRATOR_MODEL)
-        prompt = f"""Analyse cette demande et détermine si elle est SUFFISAMMENT CLAIRE pour être traitée
-directement, ou si elle nécessite une clarification.
+        prompt = f"""Analyse cette demande et détermine si elle est TRAITABLE DIRECTEMENT
+ou si elle est VRAIMENT impossible à traiter sans une précision.
 
 DEMANDE : {task[:500]}
 TYPE : {task_type}
 
-Règles :
-- Si la demande est claire et peut être traitée immédiatement, réponds : CLAIR
-- Si elle est ambiguë (langage manquant, critères manquants, contexte insuffisant),
-  pose UNE question courte et précise pour clarifier.
+IMPORTANT : Sois TRÈS permissif. Ne demande une clarification QUE si la demande
+est VRAIMENT impossible à traiter (ex: "fais un script" sans aucune autre info,
+"modifie le code" sans le code, "trouve un hôtel" sans aucune date ni lieu).
+
+Dans 95% des cas, tu dois répondre CLAIR, même si la demande est un peu vague.
+L'orchestrateur et le chercheur sont capables de faire des suppositions raisonnables.
+Ne demande JAMAIS de clarification pour des questions simples, des recherches web,
+des questions factuelles, ou des demandes qui peuvent être traitées avec le contexte disponible.
+
+- Si la demande est traitable (même vaguement), réponds : CLAIR
+- UNIQUEMENT si elle est vraiment impossible à traiter, pose UNE question courte.
 
 Réponds soit "CLAIR" soit ta question (une seule, courte)."""
         result = chat_complete(
