@@ -1,19 +1,22 @@
 """
 Serveur web Flask pour l'interface de l'orchestrateur.
 
-Expose :
-- GET  /            -> page HTML (chat + tableau de tokens + budget)
-- GET  /api/usage   -> JSON : consommation par agent + budget
-- GET  /api/status  -> JSON : statut des agents
-- POST /api/chat    -> JSON : envoie un message, retourne la réponse
-- POST /api/reset   -> JSON : reset la conversation
+Endpoints :
+- GET  /                 -> page HTML (chat + tableau + budget, responsive mobile)
+- GET  /api/usage        -> JSON : consommation par agent + budget
+- GET  /api/status       -> JSON : statut des agents
+- POST /api/chat         -> JSON : envoie un message, retourne la réponse
+- POST /api/reset        -> JSON : reset la conversation
+- GET  /api/journal      -> JSON : contenu du journal
+- GET  /api/traces       -> JSON : dernières traces d'appels API
+- GET  /api/pending      -> JSON : actions en attente d'approbation
+- POST /api/approve      -> JSON : approuve/refuse une action
 
 Lance avec : python -m web.app  (ou  python web/app.py)
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
@@ -28,19 +31,16 @@ logger = logging.getLogger("orchestrator.web")
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
-# Variables globales (partagées entre les routes)
 _budget_manager = None
 _watcher = None
 _conversation = None
 _orchestrator = None
 
-# Verrou pour éviter les tâches parallèles (un seul orchestrateur à la fois)
 _task_lock = threading.Lock()
 _current_task_status: dict[str, Any] = {"running": False, "task": "", "result": None}
 
 
 def init(budget_manager, watcher, conversation, orchestrator):
-    """Initialise les références partagées. À appeler au démarrage."""
     global _budget_manager, _watcher, _conversation, _orchestrator
     _budget_manager = budget_manager
     _watcher = watcher
@@ -50,13 +50,11 @@ def init(budget_manager, watcher, conversation, orchestrator):
 
 @app.route("/")
 def index():
-    """Page HTML principale."""
     return send_from_directory(app.template_folder, "index.html")
 
 
 @app.route("/api/usage")
 def api_usage():
-    """Retourne la consommation de tokens par agent + budget."""
     data = {"budget": {}, "session": {}, "conversation": {}}
     if _budget_manager:
         data["budget"] = _budget_manager.to_dict()
@@ -69,13 +67,11 @@ def api_usage():
 
 @app.route("/api/status")
 def api_status():
-    """Retourne le statut courant (tâche en cours ou non)."""
     return jsonify(_current_task_status)
 
 
 @app.route("/api/chat", methods=["POST"])
 def api_chat():
-    """Envoie un message à l'orchestrateur et retourne la réponse."""
     data = request.get_json(force=True)
     message = data.get("message", "").strip()
     if not message:
@@ -84,15 +80,12 @@ def api_chat():
     if _current_task_status["running"]:
         return jsonify({"error": "une tâche est déjà en cours, patiente"}), 409
 
-    # Lance la tâche en arrière-plan
     def run_task():
         _current_task_status["running"] = True
         _current_task_status["task"] = message
         _current_task_status["result"] = None
         try:
-            # Ajoute le message à la conversation
             _conversation.add_user(message)
-            # Exécute via l'orchestrateur
             result = _orchestrator.run(message, use_two_coders=True, max_iterations=3)
             _current_task_status["result"] = {
                 "final_code": result.final_code,
@@ -101,12 +94,10 @@ def api_chat():
                 "plan": result.plan,
                 "watcher": result.watcher,
             }
-            # L'orchestrateur répond avec le code produit
             response = (
-                f"📋 Plan : {result.plan[:200]}\n\n"
-                f"✅ Verdict : {result.verification.get('verdict', '?')} "
-                f"({result.iterations} itération(s))\n\n"
-                f"```\n{result.final_code}\n```"
+                f"Plan : {result.plan[:200]}\n"
+                f"Verdict : {result.verification.get('verdict', '?')} ({result.iterations} itération(s))\n"
+                f"Code :\n{result.final_code}"
             )
             _conversation.add_assistant(response)
         except Exception as exc:
@@ -116,15 +107,12 @@ def api_chat():
         finally:
             _current_task_status["running"] = False
 
-    thread = threading.Thread(target=run_task, daemon=True)
-    thread.start()
-
+    threading.Thread(target=run_task, daemon=True).start()
     return jsonify({"status": "tâche lancée", "task": message})
 
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
-    """Reset la conversation (garde le journal.md)."""
     if _conversation:
         _conversation.reset()
         return jsonify({"status": "conversation réinitialisée"})
@@ -133,13 +121,36 @@ def api_reset():
 
 @app.route("/api/journal")
 def api_journal():
-    """Retourne le contenu du journal."""
     from agents.scribe import read_journal
     return jsonify({"journal": read_journal()})
 
 
+@app.route("/api/traces")
+def api_traces():
+    from tools.mistral_client import read_traces
+    limit = request.args.get("limit", 50, type=int)
+    return jsonify({"traces": read_traces(limit=limit)})
+
+
+@app.route("/api/pending")
+def api_pending():
+    from guardrails import get_pending_actions
+    return jsonify({"pending": get_pending_actions()})
+
+
+@app.route("/api/approve", methods=["POST"])
+def api_approve():
+    from guardrails import approve_action
+    data = request.get_json(force=True)
+    action_id = data.get("action_id", "")
+    approved = bool(data.get("approved", False))
+    found = approve_action(action_id, approved)
+    if found:
+        return jsonify({"status": "approved" if approved else "rejected", "action_id": action_id})
+    return jsonify({"error": "action non trouvée"}), 404
+
+
 def run(host: str = "0.0.0.0", port: int = 5000) -> None:
-    """Lance le serveur Flask."""
     logger.info("Interface web sur http://%s:%d", host, port)
     app.run(host=host, port=port, debug=False, threaded=True)
 
