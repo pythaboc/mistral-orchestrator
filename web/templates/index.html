@@ -95,6 +95,9 @@
     <div class="section-title" style="margin-top:16px">💬 Contexte</div>
     <div class="budget-text" id="ctxStats">--</div>
 
+    <div class="section-title" style="margin-top:16px">🤖 Agents</div>
+    <div id="agentsStatus"><div class="budget-text">--</div></div>
+
     <div class="section-title" style="margin-top:16px">📝 Traces récentes</div>
     <div id="tracesList" style="font-size:11px;max-height:150px;overflow-y:auto"><div class="budget-text">--</div></div>
   </div>
@@ -179,7 +182,23 @@ async function fetchTraces() {
 
 function formatResult(r) {
   if (r.error) return '❌ Erreur : ' + r.error;
-  let txt = '📋 Plan : ' + (r.plan||'').slice(0,200) + '\n\n';
+  var type = r.task_type || 'code';
+  if (type === 'research' || type === 'info') {
+    var txt = '🔍 Résultat de recherche :\n\n' + (r.answer||'(pas de réponse)');
+    var sources = (r.research||{}).sources || [];
+    if (sources.length) {
+      txt += '\n\n📚 Sources :';
+      for (var i=0; i<Math.min(sources.length,5); i++) {
+        txt += '\n• ' + (sources[i].title||'').slice(0,60) + ' — ' + sources[i].url;
+      }
+    }
+    return txt;
+  }
+  if (type === 'chat') {
+    return '💬 ' + (r.answer||'');
+  }
+  // code
+  var txt = '📋 Plan : ' + (r.plan||'').slice(0,200) + '\n\n';
   txt += '✅ Verdict : ' + ((r.verification||{}).verdict||'?') + ' (' + (r.iterations||0) + ' itération(s))\n\n';
   txt += '```\n' + (r.final_code||'') + '\n```';
   return txt;
@@ -218,11 +237,28 @@ async function approveAction(id, approved) {
   fetchPending();
 }
 
+async function fetchAgents() {
+  try {
+    const r = await fetch('/api/agents');
+    const d = await r.json();
+    const agents = d.agents || [];
+    if (!agents.length) { document.getElementById('agentsStatus').innerHTML='<div class="budget-text">--</div>'; return; }
+    const colors = {orchestrateur:'#e94560', chercheur:'#4fc3f7', codeur_1:'#00b894', codeur_2:'#00b894', verificateur:'#ffd54f', veilleur:'#ef5350', scribe:'#26c6da'};
+    let html = '';
+    for (const a of agents) {
+      var dot = a.status==='actif'?'🟢':(a.tokens>0?'⚪':'⚫');
+      html += '<div class="agent-row"><span style="color:'+(colors[a.name]||'#aaa')+'">'+dot+' '+a.name+'</span><span class="tokens">'+a.tokens.toLocaleString()+'tk</span></div>';
+      html += '<div class="budget-text" style="padding-left:12px;font-size:10px">'+a.role+' · '+a.model+'</div>';
+    }
+    document.getElementById('agentsStatus').innerHTML = html;
+  } catch(e) {}
+}
 setInterval(fetchUsage, 3000);
 setInterval(fetchStatus, 2000);
 setInterval(fetchPending, 4000);
 setInterval(fetchTraces, 5000);
-fetchUsage(); fetchStatus(); fetchPending(); fetchTraces();
+setInterval(fetchAgents, 3000);
+fetchUsage(); fetchStatus(); fetchPending(); fetchTraces(); fetchAgents();
 </script>
 </body>
 </html>

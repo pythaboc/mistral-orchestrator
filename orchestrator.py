@@ -71,14 +71,16 @@ class TaskResult:
     """Résultat final d'une tâche orchestrée."""
 
     task: str
-    plan: str
-    research: dict | None
-    code_candidates: list[dict]
-    chosen_candidate: int
-    final_code: str
-    verification: dict
-    iterations: int
-    watcher: dict
+    task_type: str = "code"  # "code" | "research" | "info" | "chat"
+    plan: str = ""
+    answer: str = ""  # réponse texte (pour les tâches non-code)
+    research: dict | None = None
+    code_candidates: list[dict] = field(default_factory=list)
+    chosen_candidate: int = 0
+    final_code: str = ""
+    verification: dict = field(default_factory=dict)
+    iterations: int = 0
+    watcher: dict = field(default_factory=dict)
     journal_entries: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -131,6 +133,14 @@ class Orchestrator:
         self.watcher.check_budget()
 
         live.section(f"🎯 Tâche : {task[:100]}")
+
+        # 0. ROUTING : l'orchestrateur détecte le TYPE de tâche
+        task_type = self._route_task(task)
+        live.agent_info("orchestrateur", f"Type de tâche détecté : {task_type}")
+
+        # Si la tâche n'est pas du code, on route vers le chercheur directement
+        if task_type in ("research", "info", "chat"):
+            return self._handle_non_code_task(task, task_type, language, journal_entries)
 
         # 1. L'orchestrateur élabore un PLAN et décide de la recherche.
         plan, research_needed, research_query = self._plan_task(task, language)
@@ -292,6 +302,7 @@ class Orchestrator:
 
         return TaskResult(
             task=task,
+            task_type="code",
             plan=plan,
             research=research,
             code_candidates=code_candidates,
@@ -304,7 +315,113 @@ class Orchestrator:
         )
 
     # ------------------------------------------------------------------ #
-    #  Étape 1 : Planification
+    #  Étape 0 : Routing (détection du type de tâche)
+    # ------------------------------------------------------------------ #
+
+    def _route_task(self, task: str) -> str:
+        """
+        L'orchestrateur détecte le type de tâche :
+        - "code" : développement logiciel (écrire/modifier du code)
+        - "research" : recherche d'informations (hôtels, produits, infos web)
+        - "info" : question factuelle ou conseil simple
+        - "chat" : conversation générale
+        """
+        live.agent_start("orchestrateur", "Analyse du type de tâche", model=_ORCHESTRATOR_MODEL)
+        prompt = f"""Analyse cette demande et classe-la dans UNE de ces catégories :
+
+DEMANDE : {task[:500]}
+
+Catégories :
+- "code" : la demande est d'écrire, modifier, debuger ou reviewer du code/programme
+- "research" : recherche d'informations pratiques (hôtels, vols, produits, lieux, disponibilités, prix)
+- "info" : question factuelle ou conseil simple (définition, explication, recommandation)
+- "chat" : conversation générale, opinion, discussion
+
+Réponds UNIQUEMENT avec le mot de la catégorie (code, research, info, ou chat)."""
+        result = chat_complete(
+            _ORCHESTRATOR_MODEL,
+            [{"role": "user", "content": prompt}],
+            temperature=0.0,
+        )
+        self.watcher.track_call("orchestrateur", tokens=result.total_tokens)
+        task_type = result.content.strip().lower().strip('." ')
+        # Normalisation
+        if "code" in task_type: task_type = "code"
+        elif "research" in task_type or "recherche" in task_type: task_type = "research"
+        elif "info" in task_type: task_type = "info"
+        elif "chat" in task_type: task_type = "chat"
+        else: task_type = "code"  # défaut
+        live.agent_done("orchestrateur", f"Type : {task_type}", result=result)
+        return task_type
+
+    def _handle_non_code_task(self, task: str, task_type: str, language: str, journal: list[str]) -> TaskResult:
+        """Gère une tâche non-code : route vers le chercheur (ou réponse directe)."""
+        # Pour research et info : le chercheur fait le travail
+        if task_type in ("research", "info"):
+            live.agent_info("orchestrateur", f"Délégation au chercheur (tâche de type {task_type})")
+            research = research_search(task)
+            self.watcher.track_call("chercheur", tokens=research.get("tokens", 0))
+
+            answer = research.get("answer", "")
+            sources = research.get("sources", [])
+
+            journal.append(
+                record_entry("recherche", f"Recherche {task_type}: {answer[:200]}", author="chercheur")
+            )
+
+            # Post-mortem léger
+            try:
+                self.watcher.check_budget()
+                pm = post_mortem(task, f"Recherche {task_type}", {
+                    "final_code": answer, "verification": {"verdict": "OK"}, "iterations": 0
+                })
+                self.watcher.track_call("orchestrateur", tokens=pm.tokens)
+                journal.append(record_entry("observation", f"Post-mortem: {pm.lessons}", author="orchestrateur"))
+            except Exception as exc:
+                logger.warning("Post-mortem échoué : %s", exc)
+
+            # Analyse veilleur
+            analysis = self.watcher.analyze()
+            watcher_report = self.watcher.get_usage()
+            watcher_report["analysis"] = analysis
+            live.task_summary(watcher_report["by_agent"], watcher_report["total_tokens"])
+
+            return TaskResult(
+                task=task,
+                task_type=task_type,
+                answer=answer,
+                research=research,
+                watcher=watcher_report,
+                journal_entries=journal,
+            )
+
+        # Pour chat : réponse directe de l'orchestrateur (Large)
+        live.agent_start("orchestrateur", "Réponse directe (conversation)", model=_ORCHESTRATOR_MODEL)
+        result = chat_complete(
+            _ORCHESTRATOR_MODEL,
+            [{"role": "user", "content": task}],
+            temperature=0.5,
+        )
+        self.watcher.track_call("orchestrateur", tokens=result.total_tokens)
+        live.agent_done("orchestrateur", "Réponse générée", result=result)
+
+        analysis = self.watcher.analyze()
+        watcher_report = self.watcher.get_usage()
+        watcher_report["analysis"] = analysis
+        live.task_summary(watcher_report["by_agent"], watcher_report["total_tokens"])
+
+        journal.append(record_entry("observation", f"Conversation: {result.content[:200]}", author="orchestrateur"))
+
+        return TaskResult(
+            task=task,
+            task_type="chat",
+            answer=result.content,
+            watcher=watcher_report,
+            journal_entries=journal,
+        )
+
+    # ------------------------------------------------------------------ #
+    #  Étape 1 : Planification (pour les tâches de code uniquement)
     # ------------------------------------------------------------------ #
 
     def _plan_task(self, task: str, language: str) -> tuple[str, bool, str]:

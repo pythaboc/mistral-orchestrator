@@ -102,7 +102,9 @@ def api_chat():
             # Le résultat est affiché UNE SEULE fois par le frontend (via /api/status)
             # On ne l'ajoute PAS à la conversation pour éviter la répétition
             _current_task_status["result"] = {
+                "task_type": result.task_type,
                 "final_code": result.final_code,
+                "answer": result.answer,
                 "verification": result.verification,
                 "iterations": result.iterations,
                 "plan": result.plan,
@@ -131,6 +133,35 @@ def api_reset():
 def api_journal():
     from agents.scribe import read_journal
     return jsonify({"journal": read_journal()})
+
+
+@app.route("/api/agents")
+def api_agents():
+    """Statut de chaque agent (disponible/occupé/inactif)."""
+    agents = [
+        {"name": "orchestrateur", "model": "mistral-large-latest", "role": "Coordinateur"},
+        {"name": "chercheur", "model": "mistral-medium-latest", "role": "Recherche web"},
+        {"name": "codeur_1", "model": "mistral-medium-latest", "role": "Codeur"},
+        {"name": "codeur_2", "model": "mistral-medium-latest", "role": "Codeur"},
+        {"name": "verificateur", "model": "mistral-medium-latest", "role": "Vérificateur"},
+        {"name": "veilleur", "model": "mistral-small-latest", "role": "Surveillance tokens"},
+        {"name": "scribe", "model": "mistral-small-latest", "role": "Mémoire"},
+    ]
+    # Statut basé sur la consommation session
+    usage = _watcher.get_usage() if _watcher else {}
+    by_agent = usage.get("by_agent", {}) or {}
+    running = _current_task_status.get("running", False)
+    for a in agents:
+        tokens = by_agent.get(a["name"], 0)
+        a["tokens"] = tokens
+        a["calls"] = usage.get("calls_by_agent", {}).get(a["name"], 0) if usage else 0
+        if running and tokens > 0:
+            a["status"] = "actif" if tokens == max(by_agent.values()) else "idle"
+        elif tokens > 0:
+            a["status"] = "inactif"
+        else:
+            a["status"] = "inactif"
+    return jsonify({"agents": agents, "running": running})
 
 
 @app.route("/api/traces")
