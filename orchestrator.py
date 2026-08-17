@@ -138,6 +138,22 @@ class Orchestrator:
         task_type = self._route_task(task)
         live.agent_info("orchestrateur", f"Type de tâche détecté : {task_type}")
 
+        # 0b. CLARIFICATION : l'orchestrateur vérifie si la demande est ambiguë
+        # et pose une question si nécessaire (au lieu de partir bille en tête)
+        question = self._maybe_clarify(task, task_type)
+        if question:
+            # La tâche est ambiguë : on retourne une question à l'utilisateur
+            analysis = self.watcher.analyze()
+            watcher_report = self.watcher.get_usage()
+            watcher_report["analysis"] = analysis
+            return TaskResult(
+                task=task,
+                task_type="clarification",
+                answer=question,
+                watcher=watcher_report,
+                journal_entries=journal_entries,
+            )
+
         # Si la tâche n'est pas du code, on route vers le chercheur directement
         if task_type in ("research", "info", "chat"):
             return self._handle_non_code_task(task, task_type, language, journal_entries)
@@ -315,7 +331,7 @@ class Orchestrator:
         )
 
     # ------------------------------------------------------------------ #
-    #  Étape 0 : Routing (détection du type de tâche)
+    #  Étape 0 : Routing (détection du type de tâche) + clarification
     # ------------------------------------------------------------------ #
 
     def _route_task(self, task: str) -> str:
@@ -353,6 +369,39 @@ Réponds UNIQUEMENT avec le mot de la catégorie (code, research, info, ou chat)
         else: task_type = "code"  # défaut
         live.agent_done("orchestrateur", f"Type : {task_type}", result=result)
         return task_type
+
+    def _maybe_clarify(self, task: str, task_type: str) -> str | None:
+        """
+        L'orchestrateur vérifie si la demande est ambiguë et pose une question
+        de clarification si nécessaire. Retourne None si tout est clair.
+        """
+        live.agent_start("orchestrateur", "Vérification : la demande est-elle claire ?", model=_ORCHESTRATOR_MODEL)
+        prompt = f"""Analyse cette demande et détermine si elle est SUFFISAMMENT CLAIRE pour être traitée
+directement, ou si elle nécessite une clarification.
+
+DEMANDE : {task[:500]}
+TYPE : {task_type}
+
+Règles :
+- Si la demande est claire et peut être traitée immédiatement, réponds : CLAIR
+- Si elle est ambiguë (langage manquant, critères manquants, contexte insuffisant),
+  pose UNE question courte et précise pour clarifier.
+
+Réponds soit "CLAIR" soit ta question (une seule, courte)."""
+        result = chat_complete(
+            _ORCHESTRATOR_MODEL,
+            [{"role": "user", "content": prompt}],
+            temperature=0.1,
+        )
+        self.watcher.track_call("orchestrateur", tokens=result.total_tokens)
+        response = result.content.strip()
+        if response.upper().startswith("CLAIR") or response.upper() == "CLAIR.":
+            live.agent_done("orchestrateur", "Demande claire, on peut procéder", result=result)
+            return None
+        # L'orchestrateur a une question
+        live.agent_done("orchestrateur", f"Question de clarification : {response[:80]}", result=result)
+        live.agent_thinking("orchestrateur", response)
+        return response
 
     def _handle_non_code_task(self, task: str, task_type: str, language: str, journal: list[str]) -> TaskResult:
         """Gère une tâche non-code : route vers le chercheur (ou réponse directe)."""

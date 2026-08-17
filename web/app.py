@@ -137,31 +137,15 @@ def api_journal():
 
 @app.route("/api/agents")
 def api_agents():
-    """Statut de chaque agent (disponible/occupé/inactif)."""
-    agents = [
-        {"name": "orchestrateur", "model": "mistral-large-latest", "role": "Coordinateur"},
-        {"name": "chercheur", "model": "mistral-medium-latest", "role": "Recherche web"},
-        {"name": "codeur_1", "model": "mistral-medium-latest", "role": "Codeur"},
-        {"name": "codeur_2", "model": "mistral-medium-latest", "role": "Codeur"},
-        {"name": "verificateur", "model": "mistral-medium-latest", "role": "Vérificateur"},
-        {"name": "veilleur", "model": "mistral-small-latest", "role": "Surveillance tokens"},
-        {"name": "scribe", "model": "mistral-small-latest", "role": "Mémoire"},
-    ]
-    # Statut basé sur la consommation session
+    """Statut temps réel de chaque agent (qui travaille MAINTENANT)."""
+    from agent_status import get_all_status
+    agents = get_all_status()
+    # Enrichit avec les tokens consommés (session)
     usage = _watcher.get_usage() if _watcher else {}
     by_agent = usage.get("by_agent", {}) or {}
-    running = _current_task_status.get("running", False)
     for a in agents:
-        tokens = by_agent.get(a["name"], 0)
-        a["tokens"] = tokens
-        a["calls"] = usage.get("calls_by_agent", {}).get(a["name"], 0) if usage else 0
-        if running and tokens > 0:
-            a["status"] = "actif" if tokens == max(by_agent.values()) else "idle"
-        elif tokens > 0:
-            a["status"] = "inactif"
-        else:
-            a["status"] = "inactif"
-    return jsonify({"agents": agents, "running": running})
+        a["tokens"] = by_agent.get(a["name"], 0)
+    return jsonify({"agents": agents, "running": _current_task_status.get("running", False)})
 
 
 @app.route("/api/traces")

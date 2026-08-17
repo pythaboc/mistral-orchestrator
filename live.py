@@ -15,6 +15,7 @@ from __future__ import annotations
 import textwrap
 from typing import Any
 
+from agent_status import set_busy, set_idle
 from tools.mistral_client import CallResult
 
 # Codes couleur ANSI (désactivables si le terminal ne supporte pas)
@@ -54,7 +55,8 @@ def _wrap(text: str, indent: str = "    ", width: int = _TERM_WIDTH) -> str:
 
 
 def agent_start(agent: str, action: str, *, model: str = "") -> None:
-    """Affiche qu'un agent commence une action."""
+    """Affiche qu'un agent commence une action + met à jour le statut temps réel."""
+    set_busy(agent, action)
     c = _color(agent)
     model_str = f" [{model}]" if model else ""
     print(f"\n{c}▶ {agent.title()}{model_str}{_COLORS['reset']}")
@@ -62,7 +64,8 @@ def agent_start(agent: str, action: str, *, model: str = "") -> None:
 
 
 def agent_done(agent: str, summary: str, result: CallResult | None = None) -> None:
-    """Affiche qu'un agent a fini, avec un résumé et les tokens consommés."""
+    """Affiche qu'un agent a fini + met à jour le statut temps réel."""
+    set_idle(agent)
     c = _color(agent)
     # On wrap le résumé s'il est long (au lieu de tronquer brutalement)
     wrapped = _wrap(summary, indent="  ✓ ")
@@ -88,7 +91,8 @@ def agent_thinking(agent: str, reasoning: str) -> None:
 
 
 def agent_error(agent: str, error: str) -> None:
-    """Affiche une erreur d'un agent."""
+    """Affiche une erreur d'un agent + libère le statut."""
+    set_idle(agent)
     c = _color(agent)
     print(f"{c}  ✗ ERREUR : {error}{_COLORS['reset']}")
 
