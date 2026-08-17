@@ -180,6 +180,65 @@ async function fetchTraces() {
   } catch(e) {}
 }
 
+// Parser markdown minimaliste (tableaux, gras, italique, listes, titres, code)
+function mdToHtml(text) {
+  if (!text) return '';
+  var lines = text.split('\n');
+  var html = '';
+  var inTable = false;
+  var tableRows = [];
+  function flushTable() {
+    if (!tableRows.length) return '';
+    var t = '<table style="border-collapse:collapse;width:100%;margin:8px 0;font-size:12px">';
+    for (var i=0; i<tableRows.length; i++) {
+      var cells = tableRows[i].split('|').filter(function(c){return c.trim()!=='';});
+      if (i===1 && cells.every(function(c){return /^[-: ]+$/.test(c.trim());})) continue; // ligne de séparation
+      var tag = (i===0) ? 'th' : 'td';
+      t += '<tr>';
+      for (var j=0; j<cells.length; j++) {
+        var style = (i===0) ? 'background:#0f3460;padding:6px 8px;text-align:left;border:1px solid #333' : 'padding:6px 8px;border:1px solid #333';
+        t += '<'+tag+' style="'+style+'">'+inlineMd(cells[j].trim())+'</'+tag+'>';
+      }
+      t += '</tr>';
+    }
+    t += '</table>';
+    tableRows = [];
+    return t;
+  }
+  function inlineMd(s) {
+    return s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*(.+?)\*/g, '<em>$1</em>')
+            .replace(/`(.+?)`/g, '<code style="background:#0d1117;padding:1px 4px;border-radius:3px">$1</code>')
+            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color:#4fc3f7">$1</a>');
+  }
+  for (var i=0; i<lines.length; i++) {
+    var line = lines[i];
+    // Tableau
+    if (line.trim().startsWith('|') && line.trim().endsWith('|')) {
+      tableRows.push(line.trim().slice(1,-1));
+      inTable = true;
+      continue;
+    } else if (inTable) {
+      html += flushTable();
+      inTable = false;
+    }
+    // Titres
+    if (line.startsWith('### ')) { html += '<h4 style="margin:8px 0 4px;color:#e94560">'+inlineMd(line.slice(4))+'</h4>'; continue; }
+    if (line.startsWith('## ')) { html += '<h3 style="margin:10px 0 4px;color:#e94560">'+inlineMd(line.slice(3))+'</h3>'; continue; }
+    if (line.startsWith('# ')) { html += '<h2 style="margin:10px 0 4px;color:#e94560">'+inlineMd(line.slice(2))+'</h2>'; continue; }
+    // Séparateur
+    if (line.trim()==='---') { html += '<hr style="border:0;border-top:1px solid #333;margin:8px 0">'; continue; }
+    // Liste
+    if (line.match(/^[*-] /)) { html += '<div style="padding-left:16px">• '+inlineMd(line.replace(/^[*-] /,''))+'</div>'; continue; }
+    // Ligne vide
+    if (line.trim()==='') { html += '<div style="height:6px"></div>'; continue; }
+    // Texte normal
+    html += '<div>'+inlineMd(line)+'</div>';
+  }
+  if (inTable) html += flushTable();
+  return html;
+}
+
 function formatResult(r) {
   if (r.error) return '❌ Erreur : ' + r.error;
   var type = r.task_type || 'code';
@@ -234,7 +293,19 @@ async function sendMsg() {
 function addMsg(role, content) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
-  div.innerHTML = '<div class="role">'+(role==='user'?'Toi':'Orchestrateur')+'</div>'+content.replace(/```([\s\S]*?)```/g, '<pre>$1</pre>');
+  // Parse le markdown : code blocks d'abord, puis markdown sur le reste
+  var parts = content.split(/```/);
+  var html = '<div class="role">'+(role==='user'?'Toi':'Orchestrateur')+'</div>';
+  for (var i=0; i<parts.length; i++) {
+    if (i%2===1) {
+      // Bloc de code
+      html += '<pre>'+parts[i].replace(/^\w*\n/,'')+'</pre>';
+    } else {
+      // Markdown
+      html += mdToHtml(parts[i]);
+    }
+  }
+  div.innerHTML = html;
   const messages = document.getElementById('messages');
   messages.appendChild(div);
   messages.scrollTop = messages.scrollHeight;
