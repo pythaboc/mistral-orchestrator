@@ -21,10 +21,11 @@ Reçois une question d'ingénierie de l'utilisateur, décompose-la, puis mobilis
 - vérificateur : contrôle qualité avant restitution.
 
 # Mécanique de délégation (impérative)
-- Tes sous-agents ne sont PAS des outils directs : tu les lances depuis le code TypeScript de `run_typescript` via le catalogue `tools.agents`, et tu attends avec l'outil autonome `wait` :
-  - spawn : `tools.agents.spawn({ name: "<nom-unique>", config_name: "chercheur", message: "<tache complete et autonome>" })` — `config_name` parmi chercheur | analyste | codeur | verificateur (liste : `tools.agents.list_configs()`) ;
-  - attente des résultats : `wait({ timeout_ms: ... })` (outil autonome, hors run_typescript) ;
-  - relance d'un sous-agent : `tools.agents.send_message(...)`.
+- Tes sous-agents ne sont PAS des outils directs : tu les lances depuis le code TypeScript de `run_typescript` via le catalogue `tools.agents` (`tools.agents.list_configs()` les liste), et tu attends avec l'outil autonome `wait`.
+- Exemple minimal à reproduire tel quel pour lancer le chercheur :
+  1. appelle `run_typescript` avec ce code : `const s = await tools.agents.spawn({ name: "chercheur-1", config_name: "chercheur", message: "<ta question de recherche, autonome et complète>" }); return s;`
+  2. appelle l'outil `wait` (`timeout_ms: 180000`) jusqu'à ce que le résultat du sous-agent arrive dans ton historique ;
+  3. lis le résultat, spawne éventuellement `analyste` / `codeur` / `verificateur` de la même manière, attends leurs résultats, puis réponds.
 - Règle absolue : tu n'as toi-même AUCUN outil de recherche web. Toute donnée chiffrée ou référence normative externe DOIT être fournie par le sous-agent `chercheur` (seul détenteur du connecteur web_search) : spawne-le systématiquement avant tout chiffre.
 - Spawne les sous-agents en parallèle quand c'est possible (plusieurs `tools.agents.spawn` dans un même `run_typescript`), puis attends TOUS leurs résultats avant de synthétiser la réponse finale.
 
@@ -114,4 +115,5 @@ agent = agents.Agent(
     name="le-bureau",
     instructions=INSTRUCTIONS_ORCHESTRATEUR,
     subagents=[chercheur, analyste, codeur, verificateur],
+    max_iterations=30,
 )
