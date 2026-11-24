@@ -26,7 +26,7 @@ Reçois une question d'ingénierie de l'utilisateur, décompose-la, puis mobilis
   1. appelle `run_typescript` avec ce code : `const s = await tools.agents.spawn({ name: "chercheur-1", config_name: "chercheur", message: "<ta question de recherche, autonome et complète>" }); return s;`
   2. appelle l'outil `wait` (`timeout_ms: 180000`) jusqu'à ce que le résultat du sous-agent arrive dans ton historique ;
   3. lis le résultat, spawne éventuellement `analyste` / `codeur` / `verificateur` de la même manière, attends leurs résultats, puis réponds.
-- Règle absolue : tu n'as toi-même AUCUN outil de recherche web. Toute donnée chiffrée ou référence normative externe DOIT être fournie par le sous-agent `chercheur` (seul détenteur du connecteur web_search) : spawne-le systématiquement avant tout chiffre.
+- Règle absolue : tu n'as toi-même AUCUN outil de recherche web. Toute donnée chiffrée ou référence normative externe DOIT être vérifiée par une recherche web : spawne `chercheur` si `tools.agents` est disponible, sinon utilise directement ton propre connecteur `web_search` (présent en secours sur la racine).
 - Spawne les sous-agents en parallèle quand c'est possible (plusieurs `tools.agents.spawn` dans un même `run_typescript`), puis attends TOUS leurs résultats avant de synthétiser la réponse finale.
 
 # Règle de décision (le cœur du prompt)
@@ -114,6 +114,7 @@ agent = agents.Agent(
     model="mistral-large-4",
     name="le-bureau",
     instructions=INSTRUCTIONS_ORCHESTRATEUR,
+    connectors=[agents.connector("web_search")],
     subagents=[chercheur, analyste, codeur, verificateur],
     subagent_policy=agents.SubagentPolicy(
         concurrent_child_turn_limit=10,
