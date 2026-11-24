@@ -115,5 +115,10 @@ agent = agents.Agent(
     name="le-bureau",
     instructions=INSTRUCTIONS_ORCHESTRATEUR,
     subagents=[chercheur, analyste, codeur, verificateur],
+    subagent_policy=agents.SubagentPolicy(
+        concurrent_child_turn_limit=10,
+        max_depth=2,
+        idle_message_starts="direct_children",
+    ),
     max_iterations=30,
 )
